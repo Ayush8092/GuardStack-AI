@@ -28,6 +28,18 @@ before(() => {
 after(() => fs.rmSync(base, { recursive: true, force: true }));
 
 test('allows files inside the workspace', () => {
+  const lexical = path.resolve(root, 'src/a.ts');
+  const real = fs.realpathSync.native(lexical);
+
+  console.log('[SANDBOX PATH DIAGNOSTIC]', {
+    node: process.version,
+    root,
+    lexical,
+    real,
+    relativeLexical: path.relative(root, lexical),
+    relativeReal: path.relative(root, real),
+  });
+
   assert.equal(resolveInside(root, 'src/a.ts'), path.join(root, 'src', 'a.ts'));
   assert.equal(readInside(root, 'src/a.ts', 1000).toString(), 'export const a = 1;');
 });

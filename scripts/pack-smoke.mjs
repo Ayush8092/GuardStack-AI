@@ -191,13 +191,22 @@ check('global install (--prefix)', () =>
   ),
 );
 
+const globalRoot = run(
+  npm,
+  ['root', '-g', '--prefix', prefix],
+  tmp,
+).trim();
+
 const globalBin = path.join(
-  prefix,
-  'node_modules',
+  globalRoot,
   'code-guardian-ai',
   'bin',
   'cli.js',
 );
+
+if (!fs.existsSync(globalBin)) {
+  throw new Error(`global CLI entry point not found: ${globalBin}`);
+}
 
 if (process.platform === 'win32') {
   check('Global Windows CLI launcher exists', () => {

@@ -1,0 +1,48 @@
+{
+  "name": "code-guardian-ai",
+  "version": "0.3.0",
+  "description": "Local MCP server and CLI that keeps AI coding assistants inside your codebase's real structure",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "guardian": "bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "LICENSE",
+    ".env.example",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/*.test.ts\"",
+    "doctor": "node bin/cli.js doctor",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && node scripts/pack-smoke.mjs",
+    "bench": "tsx bench/run.ts",
+    "bench:mcp": "tsx bench/mcp-latency.ts",
+    "pack:smoke": "npm run build && node scripts/pack-smoke.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^4.0.108",
+    "@ai-sdk/openai": "^4.0.105",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "ai": "^7.0.157",
+    "better-sqlite3": "^13.0.3",
+    "commander": "^15.0.0",
+    "ignore": "^7.0.14",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

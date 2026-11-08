@@ -34,6 +34,13 @@ function isInside(root: string, target: string): boolean {
 }
 
 const canonical = (p: string): string => fs.realpathSync.native(p);
+function canonicalRoot(root: string): string {
+  try {
+    return canonical(root);
+  } catch {
+    throw new SandboxError('Workspace directory not found');
+  }
+}
 
 function homeDirectory(): string | undefined {
   try {
@@ -64,9 +71,9 @@ export function resolveInside(root: string, target: string): string {
   }
   const outside = () => new SandboxError(`Path is outside the workspace: ${target}`);
   rejectWindowsForms(target);
-
-  const lexical = path.resolve(root, target);
-  if (!isInside(root, lexical)) throw outside();
+  const workspace = canonicalRoot(root);
+  const lexical = path.resolve(workspace, target);
+  if (!isInside(workspace, lexical)) throw outside();
 
   let real: string;
   try {
@@ -74,12 +81,12 @@ export function resolveInside(root: string, target: string): string {
   } catch {
     throw new SandboxError(`Path not found inside workspace: ${target}`);
   }
-  if (!isInside(root, real)) throw outside();
+  if (!isInside(workspace, real)) throw outside();
   return real;
 }
 
 export function toRelative(root: string, absolute: string): string {
-  return path.relative(root, absolute).split(path.sep).join('/');
+  return path.relative(canonicalRoot(root), absolute).split(path.sep).join('/');
 }
 
 export type ReadHooks = {
@@ -90,6 +97,7 @@ export type ReadHooks = {
 // Node has no openat2/RESOLVE_BENEATH, so the check and the open cannot be one atomic step. Instead the open is
 // verified afterwards: the descriptor we hold must still be what the path names, and that path must still be inside.
 function verifyOpened(root: string, abs: string, fd: number): void {
+  const workspace = canonicalRoot(root);
   const held = fs.fstatSync(fd, { bigint: true });
   let again: string;
   try {
@@ -97,7 +105,7 @@ function verifyOpened(root: string, abs: string, fd: number): void {
   } catch {
     throw new SandboxError('File changed while it was being read');
   }
-  if (again !== abs || !isInside(root, again)) throw new SandboxError('Path changed while it was being checked');
+  if (again !== abs || !isInside(workspace, again)) throw new SandboxError('Path changed while it was being checked');
   const named = fs.statSync(again, { bigint: true });
   if (named.ino !== held.ino || named.dev !== held.dev) throw new SandboxError('File changed while it was being read');
 }
@@ -138,8 +146,9 @@ export function readInside(root: string, rel: string, maxBytes: number, hooks: R
 // Reads a workspace file that may legitimately be absent (a config file). Absence is null; a symlink that leaves
 // the workspace, a sensitive name or an oversized file still throws, so a hostile repository cannot steer the read.
 export function readOptionalInside(root: string, rel: string, maxBytes: number, hooks: ReadHooks = {}): Buffer | null {
-  const lexical = path.resolve(root, rel);
-  if (!isInside(root, lexical)) throw new SandboxError(`Path is outside the workspace: ${rel}`);
+  const workspace = canonicalRoot(root);
+  const lexical = path.resolve(workspace, rel);
+  if (!isInside(workspace, lexical)) throw new SandboxError(`Path is outside the workspace: ${rel}`);
   try {
     fs.lstatSync(lexical);
   } catch (err) {

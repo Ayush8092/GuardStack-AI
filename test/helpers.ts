@@ -40,11 +40,20 @@ export function info(filePath: string, lang: Lang = 'typescript'): FileInfo {
 // when the platform refuses to create it; if the link can be made, the test runs and must pass.
 export const symlinksWork: string | false = (() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guardian-symlink-probe-'));
+
   try {
-    fs.symlinkSync(dir, path.join(dir, 'link'), 'dir');
+    const targetDir = path.join(dir, 'target-dir');
+    const targetFile = path.join(dir, 'target.txt');
+
+    fs.mkdirSync(targetDir);
+    fs.writeFileSync(targetFile, 'test');
+
+    fs.symlinkSync(targetDir, path.join(dir, 'directory-link'), 'dir');
+    fs.symlinkSync(targetFile, path.join(dir, 'file-link'), 'file');
+
     return false;
   } catch {
-    return 'this platform cannot create symlinks here';
+    return 'this platform cannot create the required directory and file symlinks here';
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { SandboxError, readInside, readOptionalInside, resolveInside } from '../src/core/security/sandbox.js';
 import { loadConfig } from '../src/utils/config.js';
-
+import { symlinksWork } from './helpers.js';
 let base: string;
 let root: string;
 let outside: string;
@@ -22,7 +22,7 @@ before(() => {
 
 after(() => fs.rmSync(base, { recursive: true, force: true }));
 
-test('a parent directory swapped for a symlink after the path check is caught', { skip: process.platform === 'win32' }, () => {
+test('a parent directory swapped for a symlink after the path check is caught', { skip: symlinksWork }, () => {
   assert.throws(
     () =>
       readInside(root, 'sub/file.ts', 1000, {
@@ -37,7 +37,7 @@ test('a parent directory swapped for a symlink after the path check is caught', 
   fs.renameSync(path.join(root, 'sub.bak'), path.join(root, 'sub'));
 });
 
-test('swapping the file itself for a symlink after the path check is caught', { skip: process.platform === 'win32' }, () => {
+test('swapping the file itself for a symlink after the path check is caught', { skip: symlinksWork }, () => {
   assert.throws(() =>
     readInside(root, 'sub/file.ts', 1000, {
       afterResolve: () => {
@@ -61,19 +61,19 @@ test('malicious path forms are rejected', () => {
   assert.throws(() => resolveInside(root, 'sub/missing.ts'), SandboxError);
 });
 
-test('a symlinked directory that leaves the workspace cannot be read through', { skip: process.platform === 'win32' }, () => {
+test('a symlinked directory that leaves the workspace cannot be read through', { skip: symlinksWork }, () => {
   fs.symlinkSync(outside, path.join(root, 'escape'));
   assert.throws(() => readInside(root, 'escape/file.ts', 1000), SandboxError);
   fs.rmSync(path.join(root, 'escape'));
 });
 
-test('a symlink loop does not hang or leak', { skip: process.platform === 'win32' }, () => {
+test('a symlink loop does not hang or leak', { skip: symlinksWork }, () => {
   fs.symlinkSync('b', path.join(root, 'a'));
   fs.symlinkSync('a', path.join(root, 'b'));
   assert.throws(() => readInside(root, 'a', 1000), SandboxError);
 });
 
-test('.guardianrc is read through the sandbox: absent means defaults, a symlink out is refused', { skip: process.platform === 'win32' }, () => {
+test('.guardianrc is read through the sandbox: absent means defaults, a symlink out is refused', { skip: symlinksWork }, () => {
   assert.equal(readOptionalInside(root, '.guardianrc', 1000), null);
   assert.equal(loadConfig(root).maxFiles, 5000);
 

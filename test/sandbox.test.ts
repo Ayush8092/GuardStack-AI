@@ -66,7 +66,7 @@ test('refuses filesystem root and home directory as workspace', () => {
   assert.throws(() => resolveWorkspaceRoot(path.parse(process.cwd()).root), SandboxError);
   assert.throws(() => resolveWorkspaceRoot(os.homedir()), SandboxError);
   assert.throws(() => resolveWorkspaceRoot(path.join(base, 'missing')), SandboxError);
-  assert.equal(resolveWorkspaceRoot(root), root);
+  assert.equal(resolveWorkspaceRoot(root), fs.realpathSync.native(root));
 });
 
 test('does not hang on a FIFO named like a source file', { skip: process.platform === 'win32', timeout: 5000 }, () => {
@@ -98,7 +98,7 @@ test('survives symlink loops and odd path forms', { skip: symlinksWork }, () => 
   assert.throws(() => resolveInside(root, 'loop-a'), SandboxError);
   assert.throws(() => resolveInside(root, 'x'.repeat(5000)), SandboxError);
   assert.throws(() => resolveInside(root, 'src/../../project-evil'), SandboxError);
-  assert.equal(resolveInside(root, 'src/'), path.join(root, 'src'));
+  assert.equal(resolveInside(root, 'src/'), fs.realpathSync.native(path.join(root, 'src')));
 });
 
 test('refuses the parent of the home directory', () => {

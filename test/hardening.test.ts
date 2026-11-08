@@ -14,7 +14,7 @@ import { resolvePolicy } from '../src/core/llm/policy.js';
 import { refinePrompt } from '../src/core/prompt/refiner.js';
 import { closeDb, openDb } from '../src/db/client.js';
 import { reply } from '../src/mcp/tools/result.js';
-import { symlinksWork } from './helpers.js';
+import { directoryLinksWork, createDirectoryLink } from './helpers.js';
 import { SandboxError } from '../src/core/security/sandbox.js';
 import { loadConfig } from '../src/utils/config.js';
 
@@ -78,28 +78,56 @@ test('a corrupted cache.db is rebuilt', async () => {
 test('falls back to an in-memory cache when .guardian is a file', async () => {
   const root = workspace({ 'a.ts': 'export const a = 1;\n', '.guardian': 'not a directory' });
   const ctx = context(root);
-  assert.equal((await indexProject(ctx)).files.length, 1);
-  assert.equal(fs.readFileSync(path.join(root, '.guardian'), 'utf8'), 'not a directory');
-  closeDb(ctx.db);
+
+  try {
+    assert.equal((await indexProject(ctx)).files.length, 1);
+    assert.equal(fs.readFileSync(path.join(root, '.guardian'), 'utf8'), 'not a directory');
+
+    const main = ctx.db.prepare('PRAGMA database_list').get() as { name: string; file: string };
+    assert.equal(main.file, '', 'cache should use an SQLite in-memory database');
+  } finally {
+    closeDb(ctx.db);
+  }
 });
 
-test('never writes through a .guardian symlink that leaves the workspace', { skip: symlinksWork }, async () => {
-  const root = workspace({ 'a.ts': 'export const a = 1;\n' });
-  const elsewhere = workspace();
-  fs.symlinkSync(elsewhere, path.join(root, '.guardian'));
-  const ctx = context(root);
-  assert.equal((await indexProject(ctx)).files.length, 1);
-  assert.deepEqual(fs.readdirSync(elsewhere), []);
-  closeDb(ctx.db);
-});
+test(
+  'never writes through a .guardian symlink that leaves the workspace',
+  { skip: directoryLinksWork },
+  async () => {
+    const root = workspace({ 'a.ts': 'export const a = 1;\n' });
+    const elsewhere = workspace();
+
+    createDirectoryLink(elsewhere, path.join(root, '.guardian'));
+
+    const ctx = context(root);
+
+    try {
+      assert.equal((await indexProject(ctx)).files.length, 1);
+      assert.deepEqual(fs.readdirSync(elsewhere), []);
+    } finally {
+      closeDb(ctx.db);
+    }
+  },
+);
 
 test('falls back to memory in a read-only workspace', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
   const root = workspace({ 'a.ts': 'export const a = 1;\n' });
-  fs.chmodSync(root, 0o555);
-  const ctx = context(root);
-  assert.equal((await indexProject(ctx)).files.length, 1);
-  closeDb(ctx.db);
-  fs.chmodSync(root, 0o755);
+
+  try {
+    fs.chmodSync(root, 0o555);
+    const ctx = context(root);
+
+    try {
+      assert.equal((await indexProject(ctx)).files.length, 1);
+
+      const main = ctx.db.prepare('PRAGMA database_list').get() as { name: string; file: string };
+      assert.equal(main.file, '', 'cache should use an SQLite in-memory database');
+    } finally {
+      closeDb(ctx.db);
+    }
+  } finally {
+    fs.chmodSync(root, 0o755);
+  }
 });
 
 test('parallel processes can share one cold cache without locking errors', { timeout: 90_000 }, async () => {

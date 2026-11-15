@@ -48,6 +48,28 @@ jobs:
       - run: npm run build
       - run: node bin/cli.js doctor
       - run: npm test
+
+      # Temporary diagnostic: inspect Windows machine-state directory permissions
+      - name: Diagnose Windows state directory ACL
+        if: runner.os == 'Windows' && always()
+        shell: powershell
+        run: |
+          Write-Output "=== Current identity ==="
+          whoami
+          whoami /user
+
+          Write-Output "=== LOCALAPPDATA ==="
+          icacls.exe $env:LOCALAPPDATA
+
+          $state = Join-Path $env:LOCALAPPDATA 'guardian'
+          Write-Output "=== Machine state directory ==="
+          if (Test-Path $state) {
+            icacls.exe $state
+          } else {
+            Write-Output "State directory does not exist"
+          }
+
+
       # The Windows-only tests (process-tree termination, ACL checks) are skipped everywhere else and a skipped test is reported as a
       # pass. This step runs them again on Windows and fails unless each required one actually ran and passed; the TAP output is kept
       # as the evidence.

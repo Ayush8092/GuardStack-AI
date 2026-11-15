@@ -59,7 +59,7 @@ export function currentUserSid(): string {
 
 // One SDDL string per path, in order. Paths travel in an environment variable, never inside the script text.
 export function readSddls(paths: string[]): string[] {
-  const script = "$ErrorActionPreference = 'Stop'; foreach ($p in @(ConvertFrom-Json $env:GUARDIAN_ACL_PATHS)) { (Get-Acl -LiteralPath $p).Sddl }";
+  const script = "$ErrorActionPreference = 'Stop'; Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; foreach ($p in @(ConvertFrom-Json $env:GUARDIAN_ACL_PATHS)) { (Get-Acl -LiteralPath $p).Sddl }";
   const out = run(system32(path.join('WindowsPowerShell', 'v1.0', 'powershell.exe')), ['-NoProfile', '-NonInteractive', '-Command', script], {
     ...process.env,
     GUARDIAN_ACL_PATHS: JSON.stringify(paths),

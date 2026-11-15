@@ -27,10 +27,36 @@ export type ParseHealth = {
   missing: number;
   // First affected lines (1-based, at most MAX_LINES).
   lines: number[];
+  // Set when the file was not analysed because its syntax tree exceeded a resource budget (see measureTree). Nothing was
+  // extracted from such a file, so it is always 'degraded' and must never be read as a clean result.
+  limit?: 'depth' | 'nodes';
 };
 
 const MAX_LINES = 5;
 const MAX_VISITED = 5000;
+
+// Per-file budgets for the syntax tree. Every extraction pass walks the whole tree, and several walk up the parent chain per
+// reference, so cost grows with node count and with depth. The node budget sits well above the largest allowed source file
+// (maxFileKb tops out at 2 MB, roughly one node per 2-3 bytes even when minified); real code is nowhere near the depth budget
+// (long else-if and string-concatenation chains in generated files reach a few hundred). A file beyond either is reported as
+// partial instead of analysed.
+export const MAX_TREE_NODES = 750_000;
+export const MAX_TREE_DEPTH = 1_000;
+
+export type TreeBudget = { nodes: number; depth: number };
+
+// Counts nodes and measures depth with an explicit stack, so a hostile file cannot exhaust the JavaScript call stack, and
+// stops the moment a budget is crossed so the cost of the check itself is bounded. Returns the budget that was exceeded.
+export function exceedsBudget(root: TreeNode, budget: TreeBudget = { nodes: MAX_TREE_NODES, depth: MAX_TREE_DEPTH }): 'depth' | 'nodes' | undefined {
+  const stack: { node: TreeNode; depth: number }[] = [{ node: root, depth: 1 }];
+  let nodes = 0;
+  for (let entry = stack.pop(); entry; entry = stack.pop()) {
+    if (++nodes > budget.nodes) return 'nodes';
+    if (entry.depth > budget.depth) return 'depth';
+    for (const child of entry.node.children) if (child) stack.push({ node: child, depth: entry.depth + 1 });
+  }
+  return undefined;
+}
 const STRUCTURAL = new Set(['import_statement', 'import_from_statement', 'future_import_statement', 'export_statement', 'import_require_clause']);
 
 function flag(node: TreeNode, key: 'isMissing' | 'isError' | 'hasError'): boolean {
@@ -323,10 +349,12 @@ export function assessParse(root: TreeNode, lang: Lang, source = ''): ParseHealt
   let structural = false;
   const lines: number[] = [];
 
-  const visit = (node: TreeNode): void => {
+  // Explicit stack: error-bearing subtrees can be as deep as the file allows, and the call stack must not be what limits that.
+  const pending: TreeNode[] = reported ? [root] : [];
+  for (let node = pending.pop(); node; node = pending.pop()) {
     if (++visited > MAX_VISITED) {
       structural = true;
-      return;
+      break;
     }
     const isMissing = flag(node, 'isMissing');
     const isError = node.type === 'ERROR' || flag(node, 'isError');
@@ -336,11 +364,14 @@ export function assessParse(root: TreeNode, lang: Lang, source = ''): ParseHealt
       const line = node.startPosition.row + 1;
       if (lines.length < MAX_LINES && !lines.includes(line)) lines.push(line);
       if (damagesStructure(node, lang)) structural = true;
-      return;
+      continue;
     }
-    for (const child of node.children) if (child && flag(child, 'hasError')) visit(child);
-  };
-  if (reported) visit(root);
+    // Pushed in reverse so subtrees are still visited in source order.
+    for (let i = node.children.length - 1; i >= 0; i--) {
+      const child = node.children[i];
+      if (child && flag(child, 'hasError')) pending.push(child);
+    }
+  }
 
   // A malformed import is not a dependency to rely on: the file's imports are degraded. An empty suite leaves the declaration
   // itself (its name, kind and position) intact, so it is only recovered.
@@ -362,6 +393,10 @@ export function assessParse(root: TreeNode, lang: Lang, source = ''): ParseHealt
 }
 
 export function describeHealth(health: ParseHealth): string {
+  if (health.limit) {
+    const what = health.limit === 'depth' ? `nested deeper than ${MAX_TREE_DEPTH} levels` : `larger than ${MAX_TREE_NODES} syntax nodes`;
+    return `the file is ${what}, so it was not analysed and nothing was extracted from it`;
+  }
   const parts = [health.errors > 0 ? `${health.errors} syntax error(s)` : '', health.missing > 0 ? `${health.missing} missing token(s)` : ''].filter(Boolean);
   const where = health.lines.length > 0 ? ` near line ${health.lines.join(', ')}` : '';
   const effect =

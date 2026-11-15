@@ -185,7 +185,11 @@ test('a .guardianrc that did not exist at the base commit means defaults, not to
   write(root, '.guardianrc', JSON.stringify({ ignore: ['legacy/'] }));
 
   const result = await validate(root);
-  assert.ok(ids(result.fixed).includes('suppression:legacy/old.ts'));
+  // The finding is gone because the change added an ignore pattern, not because the code was fixed: it is reported as
+  // suppressed by the configuration downgrade and is not counted as fixed.
+  assert.ok(!ids(result.fixed).includes('suppression:legacy/old.ts'), 'an ignore pattern is not a fix');
+  assert.ok(ids(result.suppressedByPolicy).includes('suppression:legacy/old.ts'));
+  assert.ok(result.configDowngrades.some((d) => d.kind === 'ignore-added'));
   assert.ok(result.baselineNotes.some((n) => /\.guardianrc/.test(n)));
 });
 

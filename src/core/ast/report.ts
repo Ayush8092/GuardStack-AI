@@ -52,6 +52,7 @@ export function renderFindings(findings: Finding[], perRule = 15, explain = fals
 const STOP_TEXT: Record<NonNullable<Project['stopped']>, string> = {
   'entry-limit': 'file discovery stopped at maxDiscoveryEntries, so part of the workspace was never listed',
   'time-limit': 'file discovery stopped at maxDiscoveryMs, so part of the workspace was never listed',
+  'memory-limit': 'file discovery stopped at its memory budget (maxDiscoveryMemoryMb), so part of the workspace was never listed',
   'index-time-limit': 'indexing stopped at maxIndexMs before every file was processed (files already processed are cached: run again to continue)',
 };
 
@@ -70,7 +71,13 @@ export function describeCoverage(project: Coverage, maxFiles: number): string {
     const sample = project.skipped.slice(0, 3).map((s) => `${safe(s.path)} (${s.reason})`).join(', ');
     reasons.push(`${project.skipped.length} file(s) were skipped: ${sample}${project.skipped.length > 3 ? ', …' : ''}`);
   }
-  const issues = project.parseIssues ?? [];
+  const allIssues = project.parseIssues ?? [];
+  const unanalysed = allIssues.filter((i) => i.limit);
+  if (unanalysed.length > 0) {
+    const sample = unanalysed.slice(0, 3).map((i) => `${safe(i.path)} (${i.limit === 'depth' ? 'nested too deeply' : 'too many syntax nodes'})`).join(', ');
+    reasons.push(`${unanalysed.length} file(s) exceeded the parser's size or nesting budget and were not analysed: ${sample}${unanalysed.length > 3 ? ', …' : ''}`);
+  }
+  const issues = allIssues.filter((i) => !i.limit);
   if (issues.length > 0) {
     const degraded = issues.filter((i) => i.status === 'degraded').length;
     const sample = issues.slice(0, 3).map((i) => `${safe(i.path)} (${describeHealth(i)})`).join('; ');
@@ -79,7 +86,7 @@ export function describeCoverage(project: Coverage, maxFiles: number): string {
   const configProblems = project.configProblems ?? [];
   if (configProblems.length > 0) {
     const sample = configProblems.slice(0, 3).map(safe).join(', ');
-    reasons.push(`configuration was unavailable (${sample}${configProblems.length > 3 ? ', …' : ''}), so path aliases, workspace packages or entry points may be missing`);
+    reasons.push(`configuration was unavailable (${sample}${configProblems.length > 3 ? ', …' : ''}), so path aliases, workspace packages, entry points or ignore rules may be missing or not applied`);
   }
   return `Analysis is PARTIAL: ${reasons.join('; ')}. Findings that depend on seeing every file are marked low confidence.`;
 }
@@ -107,6 +114,16 @@ function partialNotice(v: Validation): string {
   return lines.join('\n');
 }
 
+function downgradeNotice(v: Validation): string {
+  const lines = ['CONFIGURATION WEAKENED: this change lowers what the checks look for, so findings that disappeared are not necessarily fixes.'];
+  for (const d of v.configDowngrades) lines.push(`- ${safe(d.detail)}`);
+  if (v.suppressedByPolicy.length > 0) {
+    const sample = v.suppressedByPolicy.slice(0, 5).map((f) => `${f.rule} in ${safe(f.file)}`).join(', ');
+    lines.push(`- ${v.suppressedByPolicy.length} finding(s) reported at the base commit are no longer reported only because of this, and are not counted as fixed: ${sample}${v.suppressedByPolicy.length > 5 ? ', …' : ''}`);
+  }
+  return lines.join('\n');
+}
+
 export function renderValidation(v: Validation, options: { includeExisting?: boolean; scopes?: string[] } = {}): string {
   const scopes = options.scopes ?? [];
   const inScope = <T extends Finding>(list: T[]): T[] =>
@@ -124,6 +141,7 @@ export function renderValidation(v: Validation, options: { includeExisting?: boo
   const summary = [...kinds].map(([status, n]) => `${n} ${status}`).join(', ') || 'no source files changed';
   out.push(`Scope: changes against ${safe(v.baseLabel ?? 'HEAD')}, ${summary}.`);
   if (v.partial) out.push(partialNotice(v));
+  if (v.configDowngrades.length > 0) out.push(downgradeNotice(v));
   for (const note of v.baselineNotes) out.push(`Note: ${safe(note)}`);
 
   const introduced = inScope(v.introduced);

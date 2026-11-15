@@ -22,7 +22,7 @@ function rejectWindowsForms(target: string): void {
 }
 
 const SENSITIVE_NAME =
-  /^(?:\.env.*|\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|.*\.(?:pem|key|p12|pfx|jks|keystore)|.*(?:secret|credential)s?\.[a-z0-9]+)$/i;
+  /^(?:\.env.*|\.npmrc|\.pypirc|\.netrc|\.pgpass|\.htpasswd|\.dockercfg|\.git-credentials|credentials?|id_(?:rsa|dsa|ecdsa|ed25519)|.*\.(?:pem|key|p12|pfx|jks|keystore|kdbx|tfvars|tfstate)|.*(?:secret|credential)s?\.[a-z0-9]+)$/i;
 
 export function isSensitivePath(rel: string): boolean {
   return SENSITIVE_NAME.test(rel.split('/').pop() ?? '');
@@ -50,6 +50,17 @@ function homeDirectory(): string | undefined {
   }
 }
 
+// Directories that are never a project: the top of a system tree (exactly, so a project below /var/folders or /opt still
+// works) and the folders that hold a user's keys and cloud credentials (themselves and everything below).
+const SYSTEM_DIRECTORIES = new Set(['/etc', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/boot', '/dev', '/proc', '/sys', '/root', '/var', '/System', '/Library', '/Applications']);
+const CREDENTIAL_DIRECTORIES = ['.ssh', '.gnupg', '.aws', '.azure', '.kube'];
+
+function isSystemOrCredentialDirectory(root: string, home: string | undefined): boolean {
+  if (process.platform !== 'win32' && SYSTEM_DIRECTORIES.has(root)) return true;
+  if (home === undefined) return false;
+  return CREDENTIAL_DIRECTORIES.some((name) => isInside(path.join(home, name), root));
+}
+
 export function resolveWorkspaceRoot(input: string): string {
   let root: string;
   try {
@@ -62,6 +73,7 @@ export function resolveWorkspaceRoot(input: string): string {
   const home = homeDirectory();
   const tooBroad = root === path.parse(root).root || (home !== undefined && (root === home || root === path.dirname(home)));
   if (tooBroad) throw new SandboxError('Refusing to use a filesystem root or home directory as the workspace. Pass --root <project>.');
+  if (isSystemOrCredentialDirectory(root, home)) throw new SandboxError('Refusing to use a system or credential directory as the workspace. Pass --root <project>.');
   return root;
 }
 
@@ -92,6 +104,9 @@ export function toRelative(root: string, absolute: string): string {
 export type ReadHooks = {
   // Runs between the path check and the open. Tests use it to swap a directory for a symlink at exactly the wrong moment.
   afterResolve?: () => void;
+  // Refuse a file that has more than one hard link. Off by default (source files may legitimately be hard-linked);
+  // on for control files that steer the analysis (.guardianrc, .gitignore).
+  rejectHardLinks?: boolean;
 };
 
 // Node has no openat2/RESOLVE_BENEATH, so the check and the open cannot be one atomic step. Instead the open is
@@ -128,6 +143,7 @@ export function readInside(root: string, rel: string, maxBytes: number, hooks: R
     verifyOpened(root, abs, fd);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) throw new SandboxError(`Not a regular file: ${rel}`);
+    if (hooks.rejectHardLinks && stat.nlink > 1) throw new SandboxError(`Refusing hard-linked file: ${rel}`);
     if (stat.size > maxBytes) throw new SandboxError(`File too large: ${rel}`);
 
     const data = Buffer.alloc(stat.size);

@@ -33,17 +33,23 @@ const GLOB_CALLS = new Set(['import.meta.glob', 'import.meta.globEager', 'requir
 
 // The literal text known before the first computed piece: `./plugins/${name}` and './plugins/' + name both give './plugins/'.
 function literalPrefix(arg: Node): string | undefined {
-  if (arg.type === 'string') return unquote(arg);
-  if (arg.type === 'template_string') {
-    const first = arg.children.find((c) => c?.type === 'string_fragment');
-    const start = arg.children.find((c) => c && c.type !== '`');
-    return first && start?.equals(first) ? first.text : '';
+  // `a + b + c + ...` parses as a left-leaning chain as long as the expression, so this follows the left side in a loop.
+  let current: Node = arg;
+  for (;;) {
+    if (current.type === 'string') return unquote(current);
+    if (current.type === 'template_string') {
+      const first = current.children.find((c) => c?.type === 'string_fragment');
+      const start = current.children.find((c) => c && c.type !== '`');
+      return first && start?.equals(first) ? first.text : '';
+    }
+    if (current.type === 'binary_expression' && current.childForFieldName('operator')?.text === '+') {
+      const left = current.childForFieldName('left');
+      if (!left) return undefined;
+      current = left;
+      continue;
+    }
+    return undefined;
   }
-  if (arg.type === 'binary_expression' && arg.childForFieldName('operator')?.text === '+') {
-    const left = arg.childForFieldName('left');
-    return left ? literalPrefix(left) : undefined;
-  }
-  return undefined;
 }
 
 const REFERENCE_NODES = ['identifier', 'type_identifier', 'shorthand_property_identifier'];

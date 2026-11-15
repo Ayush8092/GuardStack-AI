@@ -129,17 +129,21 @@ export function analyze(files: FileInfo[], options: AnalyzeOptions = {}): Analys
     used.set(file, names);
   };
 
-  // A name used through a barrel is a use of the module that really defines it.
+  // A name used through a barrel is a use of the module that really defines it. Iterative: a chain of re-exports can be as long as
+  // the project has files, and `seen` bounds the work to one visit per (file, name) pair.
   const markUsed = (file: string, name: string, seen: Set<string>): void => {
-    const key = `${file}\0${name}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    addUse(file, name);
+    const pending: { file: string; name: string }[] = [{ file, name }];
+    for (let item = pending.pop(); item; item = pending.pop()) {
+      const key = `${item.file}\0${item.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      addUse(item.file, item.name);
 
-    for (const forward of forwards.get(file) ?? []) {
-      if (name === '*') markUsed(forward.target, forward.imported, seen);
-      else if (forward.exported === name) markUsed(forward.target, forward.imported, seen);
-      else if (forward.exported === '*' && name !== 'default') markUsed(forward.target, name, seen);
+      for (const forward of forwards.get(item.file) ?? []) {
+        if (item.name === '*') pending.push({ file: forward.target, name: forward.imported });
+        else if (forward.exported === item.name) pending.push({ file: forward.target, name: forward.imported });
+        else if (forward.exported === '*' && item.name !== 'default') pending.push({ file: forward.target, name: item.name });
+      }
     }
   };
 
@@ -280,7 +284,7 @@ export function analyze(files: FileInfo[], options: AnalyzeOptions = {}): Analys
   const caveat = [
   ...(damaged.size > 0
     ? [
-        `${damaged.size} file(s) have syntax errors${degraded.length > 0 ? ` (${degraded.length} at the top level or inside an import/export)` : ''}, so an importer may have been missed and a missing importer proves nothing`,
+        `${damaged.size} file(s) have syntax errors or were not analysed${degraded.length > 0 ? ` (${degraded.length} at the top level or inside an import/export)` : ''}, so an importer may have been missed and a missing importer proves nothing`,
       ]
     : []),
   ...(options.complete === false

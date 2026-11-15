@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Ctx } from '../../context.js';
-import { indexProject } from '../../core/ast/indexer.js';
+import { indexShared } from '../../core/ast/shared-index.js';
 import { renderValidation } from '../../core/ast/report.js';
 import { resolveInside, toRelative } from '../../core/security/sandbox.js';
 import { validateProject } from '../../core/validation/delta.js';
@@ -27,9 +27,9 @@ export function registerValidateRules(server: McpServer, ctx: Ctx): void {
     },
     ({ paths, base, include_existing }, extra) =>
       reply(async () => {
-        const project = await indexProject(ctx, { signal: extra.signal });
+        const project = await indexShared(ctx, extra.signal);
         const scopes = (paths ?? []).map((p) => toRelative(ctx.root, resolveInside(ctx.root, p))).filter(Boolean);
-        const { validation } = await validateProject(ctx, project, { base });
+        const { validation } = await validateProject(ctx, project, { base, signal: extra.signal });
         const body = renderValidation(validation, { includeExisting: include_existing, scopes });
         const notes = indexNotes(project, ctx);
         return notes.length > 0 ? `${body}\n\n${notes.join(' ')}` : body;

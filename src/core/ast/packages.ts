@@ -237,22 +237,33 @@ export function loadPackages(read: ConfigReader, files: string[]): PackageInfo[]
 
 const CONDITIONS = new Set(['types', 'import', 'require', 'node', 'default', 'module']);
 
+// A package.json can come from node_modules or from a hostile checkout, and its `exports` map can nest as deep as the file allows
+// (JSON.parse itself does not overflow). Every walk below therefore uses an explicit stack with a hard cap on depth and on nodes
+// visited, and returns what it found so far when a cap is hit: a pathological map yields fewer entries, never a crash. Real maps
+// nest a handful of levels and hold well under a thousand entries.
+const MAX_MAP_DEPTH = 32;
+const MAX_MAP_NODES = 10_000;
+
 // Conditions are tried in the order the object lists them, as Node does.
 function pick(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = pick(item);
-      if (found) return found;
+  const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  let visited = 0;
+  for (let entry = pending.pop(); entry; entry = pending.pop()) {
+    if (++visited > MAX_MAP_NODES) return undefined;
+    if (typeof entry.value === 'string') {
+      if (entry.value) return entry.value;
+      continue;
     }
-    return undefined;
-  }
-  const object = asObject(value);
-  if (!object) return undefined;
-  for (const [key, inner] of Object.entries(object)) {
-    if (!CONDITIONS.has(key)) continue;
-    const found = pick(inner);
-    if (found) return found;
+    if (entry.depth >= MAX_MAP_DEPTH) continue;
+    // Pushed in reverse so the first listed alternative is tried first.
+    if (Array.isArray(entry.value)) {
+      for (let i = entry.value.length - 1; i >= 0; i--) pending.push({ value: entry.value[i], depth: entry.depth + 1 });
+      continue;
+    }
+    const object = asObject(entry.value);
+    if (!object) continue;
+    const keys = Object.keys(object).filter((key) => CONDITIONS.has(key));
+    for (let i = keys.length - 1; i >= 0; i--) pending.push({ value: object[keys[i]], depth: entry.depth + 1 });
   }
   return undefined;
 }
@@ -287,10 +298,9 @@ export function resolveMap(map: unknown, subpath: string): string | undefined {
 // Every target a package could serve for a subpath, in the order its map lists them. Custom conditions such as
 // "@scope/source" or "development" often point straight at source files, so unknown conditions are kept as fallbacks.
 function pickAll(value: unknown): string[] {
-  if (typeof value === 'string') return [value];
-  if (Array.isArray(value)) return value.flatMap(pickAll);
-  const object = asObject(value);
-  return object ? Object.values(object).flatMap(pickAll) : [];
+  const found: string[] = [];
+  collectStrings(value, found);
+  return found;
 }
 
 export function packageEntries(pkg: PackageInfo, subpath: string): string[] {
@@ -311,16 +321,26 @@ export function packageEntry(pkg: PackageInfo, subpath: string): string | undefi
   return pkg.types ?? pkg.module ?? pkg.main ?? './index';
 }
 
-function leaves(value: unknown, into: string[]): void {
-  if (typeof value === 'string') into.push(value);
-  else if (Array.isArray(value)) value.forEach((v) => leaves(v, into));
-  else for (const inner of Object.values(asObject(value) ?? {})) leaves(inner, into);
+// Every string in a map, in the order the map lists them, bounded as described above.
+function collectStrings(value: unknown, into: string[]): void {
+  const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  let visited = 0;
+  for (let entry = pending.pop(); entry; entry = pending.pop()) {
+    if (++visited > MAX_MAP_NODES) return;
+    if (typeof entry.value === 'string') {
+      into.push(entry.value);
+      continue;
+    }
+    if (entry.depth >= MAX_MAP_DEPTH) continue;
+    const inner = Array.isArray(entry.value) ? entry.value : Object.values(asObject(entry.value) ?? {});
+    for (let i = inner.length - 1; i >= 0; i--) pending.push({ value: inner[i], depth: entry.depth + 1 });
+  }
 }
 
 // Every file a package publishes as its public surface: exports, main, module, types and bin.
 export function publicTargets(pkg: PackageInfo): string[] {
   const found: string[] = [];
-  leaves(pkg.exports, found);
+  collectStrings(pkg.exports, found);
   for (const single of [pkg.main, pkg.module, pkg.types]) if (single) found.push(single);
   found.push(...pkg.bin);
   return [...new Set(found.filter((t) => t.startsWith('.') || !t.includes(':')))];

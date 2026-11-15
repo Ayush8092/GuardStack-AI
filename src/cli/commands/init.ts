@@ -1,12 +1,13 @@
-import fs from 'node:fs';
 import { out, err as err_ } from '../output.js';
 import path from 'node:path';
 import { prepareStateDir } from '../../db/client.js';
+import { UnsafeFileError } from '../../core/security/safe-file.js';
 import { resolveWorkspaceRoot } from '../../core/security/sandbox.js';
 import { configFileName, loadEnv, packageRoot } from '../../utils/config.js';
 import { describePolicy, resolvePolicy } from '../../core/llm/policy.js';
 import { loadConfig } from '../../utils/config.js';
 import { errorCode, errorMessage } from '../../utils/errors.js';
+import { ensureConfig, ensureGitignore } from './init-files.js';
 
 const NUDGE =
   'Before writing or changing code, call the CodeGuardian tool optimize_prompt with the task and follow its "Reuse existing code" list. ' +
@@ -17,21 +18,15 @@ function attempt(label: string, work: () => void): boolean {
     work();
     return true;
   } catch (err) {
+    if (err instanceof UnsafeFileError) {
+      // A link or special file where a plain file belongs: report it, leave it untouched and fail the command.
+      err_(`Refusing to ${label}: ${err.message}. The file was left untouched; remove it or replace it with a regular file.`);
+      process.exitCode = 2;
+      return false;
+    }
     err_(`Could not ${label}: ${errorCode(err) ?? errorMessage(err)}`);
     return false;
   }
-}
-
-function ensureGitignore(root: string): void {
-  const file = path.join(root, '.gitignore');
-  const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  if (/^\/?\.guardian\/?$/m.test(current)) return;
-  fs.appendFileSync(file, `${current && !current.endsWith('\n') ? '\n' : ''}.guardian/\n`);
-}
-
-function ensureConfig(root: string): void {
-  const file = path.join(root, configFileName);
-  if (!fs.existsSync(file)) fs.writeFileSync(file, `${JSON.stringify({ ignore: [], llm: true }, null, 2)}\n`);
 }
 
 export function init(rootArg?: string): void {
@@ -41,7 +36,7 @@ export function init(rootArg?: string): void {
   out(`Workspace: ${root}`);
   const cacheReady = prepareStateDir(root) !== null;
   out(`Cache:     ${cacheReady ? '.guardian/ ready' : 'unavailable, an in-memory cache will be used'}`);
-  if (attempt(`create ${configFileName}`, () => ensureConfig(root))) out(`Config:    ${configFileName} ready`);
+  if (attempt(`create ${configFileName}`, () => ensureConfig(root, configFileName))) out(`Config:    ${configFileName} ready`);
   attempt('update .gitignore', () => ensureGitignore(root));
 
   out(`Gemini key: ${process.env.GEMINI_API_KEY ? 'set' : 'not set'}`);

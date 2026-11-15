@@ -5,6 +5,7 @@
     "moduleResolution": "NodeNext",
     "outDir": "dist",
     "rootDir": "src",
+    "noEmitOnError": true,
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,

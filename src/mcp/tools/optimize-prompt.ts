@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Ctx } from '../../context.js';
 import { analyzeProject } from '../../core/ast/analysis.js';
-import { indexProject } from '../../core/ast/indexer.js';
+import { indexShared } from '../../core/ast/shared-index.js';
 import { resolvePolicy } from '../../core/llm/policy.js';
 import { MAX_PROMPT_CHARS, describeLlm, refinePrompt } from '../../core/prompt/refiner.js';
 import { InputError } from '../../utils/errors.js';
@@ -27,9 +27,9 @@ export function registerOptimizePrompt(server: McpServer, ctx: Ctx): void {
     ({ prompt }, extra) =>
       reply(async () => {
         if (!prompt.trim()) throw new InputError('The prompt is empty');
-        const project = await indexProject(ctx, { signal: extra.signal });
+        const project = await indexShared(ctx, extra.signal);
         const { graph } = analyzeProject(project, ctx.config);
-        const refined = await refinePrompt(ctx, project, graph, prompt, resolvePolicy(ctx.config));
+        const refined = await refinePrompt(ctx, project, graph, prompt, resolvePolicy(ctx.config), { signal: extra.signal });
 
         const notes = [describeTokens({ sent: refined.sentTokens, baseline: refined.baselineTokens, baselineFiles: refined.baselineFiles, truncated: false })];
         notes.push(describeLlm(refined), ...indexNotes(project, ctx));

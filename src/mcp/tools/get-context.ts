@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Ctx } from '../../context.js';
 import { analyzeProject } from '../../core/ast/analysis.js';
-import { indexProject } from '../../core/ast/indexer.js';
+import { indexShared } from '../../core/ast/shared-index.js';
 import { buildContext } from '../../core/prompt/compressor.js';
 import { resolveInside, toRelative } from '../../core/security/sandbox.js';
 import { recordUsage } from '../../db/client.js';
@@ -28,7 +28,7 @@ export function registerGetContext(server: McpServer, ctx: Ctx): void {
     },
     ({ query, paths, max_tokens }, extra) =>
       reply(async () => {
-        const project = await indexProject(ctx, { signal: extra.signal });
+        const project = await indexShared(ctx, extra.signal);
         const { graph } = analyzeProject(project, ctx.config);
         const scopes = (paths ?? []).map((p) => toRelative(ctx.root, resolveInside(ctx.root, p)));
         const built = buildContext(project, graph, { query, paths: scopes, budgetTokens: max_tokens ?? ctx.config.contextTokens });

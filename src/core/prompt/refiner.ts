@@ -65,18 +65,27 @@ function layout(files: FileInfo[]): string {
     .join('\n');
 }
 
-function externalMessage(request: string, criteria: string[], reuse: string[], project: Project): { message: string; truncated: boolean } {
-  const truncated = request.length > MAX_EXTERNAL_REQUEST_CHARS;
-  const message = [
-    `<request>\n${neutralizeTags(truncated ? request.slice(0, MAX_EXTERNAL_REQUEST_CHARS) : request)}\n</request>`,
+// What may leave the machine of the request is decided here, once. Everything sent externally that is derived from the request
+// (the request itself, the acceptance criteria, the symbols matched to it) is computed from THIS text, never from the full one,
+// so nothing beyond the cut-off is disclosed through a side channel.
+export function externalRequest(request: string): { text: string; truncated: boolean } {
+  if (request.length <= MAX_EXTERNAL_REQUEST_CHARS) return { text: request, truncated: false };
+  let cut = request.slice(0, MAX_EXTERNAL_REQUEST_CHARS);
+  // Never end on half of a surrogate pair.
+  if (/[\ud800-\udbff]$/.test(cut)) cut = cut.slice(0, -1);
+  return { text: cut, truncated: true };
+}
+
+function externalMessage(request: string, criteria: string[], reuse: string[], project: Project): string {
+  return [
+    `<request>\n${neutralizeTags(request)}\n</request>`,
     `<acceptance_criteria>\n${criteria.map(neutralizeTags).join('\n') || 'none stated'}\n</acceptance_criteria>`,
     `<existing_symbols>\n${reuse.join('\n') || 'none'}\n</existing_symbols>`,
     `<layout>\n${layout(project.files) || 'empty'}\n</layout>`,
   ].join('\n');
-  return { message, truncated };
 }
 
-type Options = { dryRun?: boolean };
+type Options = { dryRun?: boolean; signal?: AbortSignal };
 
 export async function refinePrompt(ctx: Ctx, project: Project, graph: Graph, input: string, policy: Policy, options: Options = {}): Promise<Refined> {
   const trimmed = input.trim();
@@ -94,9 +103,6 @@ export async function refinePrompt(ctx: Ctx, project: Project, graph: Graph, inp
   const reuse = strong.map(describe);
   const possible = weak.map(describe);
   const noConfidentMatch = retrieval !== null && !retrieval.confident;
-  // What the external model sees: signatures only, so the plain description stays free of our own commentary.
-  // Name, path and signature only, each serialized as untrusted data. No comments, docstrings or bodies leave the machine.
-  const externalReuse = [...strong, ...weak].map((m) => symbolLine({ name: m.sym.name, file: m.file.path, signature: m.sym.signature, isDefault: m.sym.exportName === 'default' }));
   const related = (retrieval?.related ?? []).map((r) => promptLine(r.file.path));
 
   let note = '';
@@ -110,16 +116,23 @@ export async function refinePrompt(ctx: Ctx, project: Project, graph: Graph, inp
   const strict = strictFromEnv(ctx.config.strictOutbound);
 
   if (policy.mode === 'external') {
-    const built = externalMessage(request.text, criteria, externalReuse, project);
-    payloadTruncated = built.truncated;
+    // The request is cut first; the criteria and the matched symbols are then derived from the cut text only.
+    const sent = externalRequest(request.text);
+    const sentCriteria = sent.truncated ? extractCriteria(sent.text) : criteria;
+    const sentMatches = sent.truncated ? (day1 ? [] : retrieve(project.files, graph, sent.text, 8).symbols) : matches;
+    // What the external model sees: signatures only, so the plain description stays free of our own commentary.
+    // Name, path and signature only, each serialized as untrusted data. No comments, docstrings or bodies leave the machine.
+    const externalReuse = [...sentMatches.filter((m) => m.strength === 'strong'), ...sentMatches.filter((m) => m.strength === 'weak')].map((m) => symbolLine({ name: m.sym.name, file: m.file.path, signature: m.sym.signature, isDefault: m.sym.exportName === 'default' }));
+    const message = externalMessage(sent.text, sentCriteria, externalReuse, project);
+    payloadTruncated = sent.truncated;
     mode = 'unavailable';
 
     if (options.dryRun) {
-      payload = prepareOutbound(SYSTEM_PROMPT, built.message, { strict });
+      payload = prepareOutbound(SYSTEM_PROMPT, message, { strict });
       mode = 'dry-run';
     } else {
       try {
-        const answer = await complete(SYSTEM_PROMPT, built.message, { strict });
+        const answer = await complete(SYSTEM_PROMPT, message, { strict, signal: options.signal });
         if (answer) {
           redactions += answer.redactions;
           const checked = validateModelAnswer(answer.text, project.files, request.text);
@@ -134,6 +147,8 @@ export async function refinePrompt(ctx: Ctx, project: Project, graph: Graph, inp
           }
         }
       } catch (err) {
+        // The client cancelled: report the cancellation, not a skipped step that looks like a normal local result.
+        if (options.signal?.aborted) throw err;
         if (err instanceof OutboundBlocked) modelIssue = err.message;
         log.warn(`Prompt clarification skipped: ${errorMessage(err)}`);
       }

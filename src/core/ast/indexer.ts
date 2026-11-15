@@ -4,10 +4,12 @@ import { performance } from 'node:perf_hooks';
 import ignore from 'ignore';
 import type { Ctx } from '../../context.js';
 import { applyCacheWrites, loadCache, type CacheWrite } from '../../db/client.js';
+import { parseCachedInfo } from './cached-info.js';
+import { RESOURCE_CEILINGS, effectiveLimit } from '../../utils/config.js';
 import { errorMessage } from '../../utils/errors.js';
 import { log } from '../../utils/logger.js';
 import { compareText } from '../../utils/text.js';
-import { isSensitivePath, readInside } from '../security/sandbox.js';
+import { isSensitivePath, readInside, readOptionalInside } from '../security/sandbox.js';
 import { createPacer } from '../../utils/pace.js';
 import { FOREIGN_SOURCE, GENERATED, languageOf, walk, type DiscoveryStop } from './discovery.js';
 import { describeHealth, type ParseHealth } from './health.js';
@@ -21,7 +23,7 @@ export { FOREIGN_SOURCE, languageOf };
 export type SkipReason = 'unreadable' | 'unparseable' | 'too-large' | 'unreadable-directory' | 'unclassified' | 'directory-replaced';
 export type SkippedFile = { path: string; reason: SkipReason };
 export type ParseIssue = { path: string } & ParseHealth;
-// entry-limit and time-limit end discovery; index-time-limit ends parsing. Cancellation throws instead.
+// entry-limit, time-limit and memory-limit end discovery; index-time-limit ends parsing. Cancellation throws instead.
 export type StopReason = DiscoveryStop | 'index-time-limit';
 export type IndexOptions = { signal?: AbortSignal };
 
@@ -67,12 +69,25 @@ export const buildIgnoreFilter = (gitignore: string, configIgnore: readonly stri
 
 export const contentHash = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
 
-export function readGitignore(root: string): string {
+// A missing .gitignore is normal. One that exists but cannot be read, is unsafe (a symlink out of the workspace, a hard link,
+// not a regular file), is too large or is refused for another reason is a different thing: its rules cannot be applied, and
+// the scan must say so instead of quietly analysing as if the file were not there.
+export type GitignoreState = { text: string; problem: string | null };
+
+const MAX_GITIGNORE_BYTES = 256 * 1024;
+
+export function readGitignoreState(root: string): GitignoreState {
   try {
-    return readInside(root, '.gitignore', 256 * 1024).toString('utf8');
-  } catch {
-    return '';
+    const data = readOptionalInside(root, '.gitignore', MAX_GITIGNORE_BYTES, { rejectHardLinks: true });
+    return { text: data ? data.toString('utf8') : '', problem: null };
+  } catch (err) {
+    return { text: '', problem: `.gitignore was not applied (${errorMessage(err)})` };
   }
+}
+
+// The text of the .gitignore, or '' when there is none or it cannot be used (readGitignoreState says which).
+export function readGitignore(root: string): string {
+  return readGitignoreState(root).text;
 }
 
 function fromCache(raw: string): FileInfo | null {
@@ -82,6 +97,35 @@ function fromCache(raw: string): FileInfo | null {
     return valid ? info : null;
   } catch {
     return null;
+  }
+}
+
+// A scan that a too small maxIndexMs keeps stopping can never finish on its own: handling a file means reading and hashing it (the
+// hash is the only validity check, so a cached file is never taken on trust), and a call that cannot get through every file within
+// its budget starts again at the same files next time. So after a call that was stopped by maxIndexMs, the next call for the same
+// workspace in this process gets twice the budget, and so on, up to the same hard ceiling that bounds the setting itself
+// (RESOURCE_CEILINGS.maxIndexMs). Nothing about validity is relaxed: every file is still read, hashed and compared before its cached
+// result is used. The state is a few small numbers, held in memory only, bounded in size, and reset by any call that is not stopped
+// by this limit. A deadline that is already expired (zero or negative) is never extended.
+const MAX_TRACKED_ROOTS = 32;
+const MAX_DOUBLINGS = 20;
+const stoppedStreak = new Map<string, number>();
+
+export function indexBudget(root: string, configured: number): number {
+  if (!(configured > 0)) return configured;
+  const doublings = stoppedStreak.get(root) ?? 0;
+  return Math.min(configured * 2 ** doublings, Math.max(configured, RESOURCE_CEILINGS.maxIndexMs));
+}
+
+export function rememberStop(root: string, stoppedByBudget: boolean): void {
+  const before = stoppedStreak.get(root) ?? 0;
+  stoppedStreak.delete(root);
+  if (!stoppedByBudget) return;
+  stoppedStreak.set(root, Math.min(before + 1, MAX_DOUBLINGS));
+  while (stoppedStreak.size > MAX_TRACKED_ROOTS) {
+    const oldest = stoppedStreak.keys().next();
+    if (oldest.done) break;
+    stoppedStreak.delete(oldest.value);
   }
 }
 
@@ -105,17 +149,28 @@ export async function indexProject(ctx: Ctx, options: IndexOptions = {}): Promis
   const pacer = createPacer({ signal });
   signal?.throwIfAborted();
 
-  const filter = buildIgnoreFilter(readGitignore(ctx.root), ctx.config.ignore);
+  // Resource limits are read once, through the trusted ceilings, so every phase of this call works with the same bounded values.
+  const maxFiles = effectiveLimit(ctx.config, 'maxFiles');
+  const maxBytes = effectiveLimit(ctx.config, 'maxFileKb') * 1024;
+  const maxIndexMs = indexBudget(ctx.root, effectiveLimit(ctx.config, 'maxIndexMs'));
+
+  const gitignore = readGitignoreState(ctx.root);
+  const filter = buildIgnoreFilter(gitignore.text, ctx.config.ignore);
   const discovered = await walk(
-    { root: ctx.root, ignores: (rel) => filter.ignores(rel), maxBytes: ctx.config.maxFileKb * 1024, isTsConfig: (name) => TSCONFIG_NAME.test(name), isSensitive: isSensitivePath },
-    { maxEntries: ctx.config.maxDiscoveryEntries, maxMs: ctx.config.maxDiscoveryMs, signal },
+    { root: ctx.root, ignores: (rel) => filter.ignores(rel), maxBytes, isTsConfig: (name) => TSCONFIG_NAME.test(name), isSensitive: isSensitivePath },
+    {
+      maxEntries: effectiveLimit(ctx.config, 'maxDiscoveryEntries'),
+      maxMs: effectiveLimit(ctx.config, 'maxDiscoveryMs'),
+      maxMemoryBytes: effectiveLimit(ctx.config, 'maxDiscoveryMemoryMb') * 1024 * 1024,
+      signal,
+    },
   );
   // maxIndexMs starts here, when discovery (which has its own limit, maxDiscoveryMs) is over, so it covers loading the grammars and
   // the cache as well as reading, hashing, cache lookups and parsing.
-  const indexDeadline = performance.now() + ctx.config.maxIndexMs;
+  const indexDeadline = performance.now() + maxIndexMs;
   // Cancelled during discovery or while waiting for it: nothing has been written yet, so the cache is untouched.
   signal?.throwIfAborted();
-  const selected = discovered.eligible.slice(0, ctx.config.maxFiles);
+  const selected = discovered.eligible.slice(0, maxFiles);
   const truncated = discovered.eligible.length > selected.length;
   await loadLanguages(selected.map((f) => f.lang));
   signal?.throwIfAborted();
@@ -131,7 +186,6 @@ export async function indexProject(ctx: Ctx, options: IndexOptions = {}): Promis
     // Replaced by a link or another directory while the scan ran: whatever was inside was not used, so the scan is partial.
     ...discovered.replacedDirs.map((p): SkippedFile => ({ path: p, reason: 'directory-replaced' })),
   ];
-  const maxBytes = ctx.config.maxFileKb * 1024;
   let stopped: StopReason | undefined = discovered.stopped;
   // Files fully handled in this call (reused from the cache, parsed, or skipped). Everything after them is `unindexed`.
   let done = 0;
@@ -170,7 +224,8 @@ export async function indexProject(ctx: Ctx, options: IndexOptions = {}): Promis
         const hash = contentHash(data);
         const cached = cache.get(file.rel);
 
-        const reusable = cached && cached.hash === hash ? fromCache(cached.info) : null;
+        // A cached result is reused only when its signature verified in loadCache and every nested field checks out here.
+        const reusable = cached && cached.hash === hash ? parseCachedInfo(cached.info, file.rel) : null;
         if (reusable) {
           if (cached && (cached.size !== file.size || cached.mtime_ms !== file.mtimeMs)) {
             writes.push({ kind: 'touch', path: file.rel, size: file.size, mtime_ms: file.mtimeMs });
@@ -233,6 +288,7 @@ export async function indexProject(ctx: Ctx, options: IndexOptions = {}): Promis
     throw err;
   }
   persist(!discovered.stopped);
+  rememberStop(ctx.root, stopped === 'index-time-limit');
   // The cache is saved; a request cancelled during the loop's last slice does not go on to load configuration files.
   signal?.throwIfAborted();
   // Files were handled stale-first; everything downstream sees them in path order, whatever order they were processed in.
@@ -249,6 +305,8 @@ export async function indexProject(ctx: Ctx, options: IndexOptions = {}): Promis
     .filter((file) => !loadedConfigs.has(file))
     .sort(compareText)
     .map((file) => `${file} could not be read or parsed`);
+  // Ignore rules that could not be applied change which files were analysed: that is a problem of the scan, not a note.
+  if (gitignore.problem) configProblems.push(gitignore.problem);
   // pyproject.toml (and the legacy setup files) only matter for entry-point detection, which only matters with Python source.
   if (discovered.eligible.some((f) => f.lang === 'python')) {
     configProblems.push(...pythonConfigProblems(reader, { pyproject: discovered.manifests.filter((m) => m.endsWith('pyproject.toml')), legacy: discovered.legacy }));
@@ -261,7 +319,7 @@ export async function indexProject(ctx: Ctx, options: IndexOptions = {}): Promis
   const complete = !truncated && !stopped && skipped.length === 0 && configProblems.length === 0 && parseIssues.length === 0;
 
   if (truncated) log.warn(`Indexed ${selected.length} of ${discovered.eligible.length} eligible files (sorted by path); raise maxFiles in .guardianrc to see more`);
-  if (stopped) log.warn(`Scan stopped early (${stopped}); the analysis is partial. Raise maxDiscoveryEntries, maxDiscoveryMs or maxIndexMs in .guardianrc, or run the scan again to continue from the cache`);
+  if (stopped) log.warn(`Scan stopped early (${stopped}); the analysis is partial. Raise maxDiscoveryEntries, maxDiscoveryMemoryMb, maxDiscoveryMs or maxIndexMs in .guardianrc, or run the scan again to continue from the cache`);
   if (skipped.length > 0) log.info(`${skipped.length} file(s) were skipped, analysis is partial`);
   if (parseIssues.length > 0) log.warn(`${parseIssues.length} file(s) have syntax errors, e.g. ${parseIssues[0].path}: ${describeHealth(parseIssues[0])}`);
   if (configProblems.length > 0) log.warn(`Analysis is partial: ${configProblems.join('; ')}`);

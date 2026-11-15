@@ -5,7 +5,7 @@ import path from 'node:path';
 import type * as TS from '@vscode/tree-sitter-wasm';
 import { extractJs } from './extract-js.js';
 import { extractPython } from './extract-py.js';
-import { assessParse } from './health.js';
+import { assessParse, exceedsBudget } from './health.js';
 import type { FileInfo, Lang } from './types.js';
 
 const require = createRequire(import.meta.url);
@@ -62,6 +62,11 @@ export function parseFile(relPath: string, lang: Lang, source: string): FileInfo
   };
 
   try {
+    // A pathologically large or deeply nested tree is not analysed: every pass below walks it, some once per reference up the
+    // parent chain. The file is returned as an empty, degraded result, so it counts as partial and is never reported as clean.
+    const limit = exceedsBudget(tree.rootNode);
+    if (limit) return unanalysed(relPath, lang, source, limit);
+
     const input: ParseInput = { root: tree.rootNode, source, lang, path: relPath, query };
     const extracted = lang === 'python' ? extractPython(input) : extractJs(input);
     // Tree-sitter always returns a tree, repairing what it cannot parse. The repairs are recorded, never hidden.
@@ -77,4 +82,22 @@ export function parseFile(relPath: string, lang: Lang, source: string): FileInfo
   } finally {
     tree.delete();
   }
+}
+
+function unanalysed(relPath: string, lang: Lang, source: string, limit: 'depth' | 'nodes'): FileInfo {
+  return {
+    path: relPath,
+    lang,
+    bytes: Buffer.byteLength(source),
+    lines: source.split('\n').length,
+    symbols: [],
+    imports: [],
+    reexports: [],
+    unusedImports: [],
+    suppressions: [],
+    dynamicLoads: [],
+    decorated: false,
+    script: false,
+    parse: { status: 'degraded', errors: 0, missing: 0, lines: [], limit },
+  };
 }

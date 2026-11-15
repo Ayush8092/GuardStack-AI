@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { afterEach, test } from 'node:test';
+import { performance } from 'node:perf_hooks';
+import { afterEach, test, type TestContext } from 'node:test';
 import { analyzeProject } from '../src/core/ast/analysis.js';
 import { indexProject } from '../src/core/ast/indexer.js';
 import { describeCoverage } from '../src/core/ast/report.js';
@@ -11,6 +12,18 @@ afterEach(cleanup);
 // already passed, which makes the rule observable without depending on how fast the machine is: exactly the first file is handled.
 const many = (n: number): Record<string, string> => Object.fromEntries(Array.from({ length: n }, (_, i) => [`src/m${String(i).padStart(3, '0')}.ts`, `export const v${i} = ${i};\n`]));
 const rows = (ctx: ReturnType<typeof context>): number => (ctx.db.prepare('SELECT COUNT(*) AS n FROM files').get() as { n: number }).n;
+
+// A clock the test controls. The indexer measures maxIndexMs with performance.now(), so replacing it makes every budget a
+// matter of how many times the clock is read and how far the test moves it, not of how fast the machine happens to be.
+// `step` is how far each reading moves it; `jump` moves it by hand (a slow cache load, say).
+function fakeClock(t: TestContext, step = 0): { jump: (ms: number) => void } {
+  let now = 1_000;
+  t.mock.method(performance, 'now', () => {
+    now += step;
+    return now;
+  });
+  return { jump: (ms) => void (now += ms) };
+}
 
 test('cold cache: the deadline stops the scan before the next file is read, and the scan is reported as incomplete', async () => {
   const ctx = context(workspace(many(120)), { maxIndexMs: -1 });
@@ -63,34 +76,34 @@ test('a scan that finishes inside its budget is complete and reports no stop', a
   assert.equal(project.unindexed, 0);
 });
 
-test('repeated calls with a small budget progressively populate the cache, and a later call completes', async () => {
+test('repeated calls with a small budget progressively populate the cache, and a later call completes', async (t) => {
+  // Every clock reading costs 1 ms and the budget is 4 ms, so a call handles a few files and then stops: the same shape as
+  // a real 4 ms budget, but identical on every machine and every run.
+  fakeClock(t, 1);
   const root = workspace(many(80));
   let last = 0;
   let calls = 0;
+  let finished = false;
 
-  for (; calls < 400; calls++) {
+  for (; calls < 400 && !finished; calls++) {
     const ctx = context(root, { maxIndexMs: 4 });
     const project = await indexProject(ctx);
     const cached = rows(ctx);
 
-    assert.ok(
-      cached >= last,
-      'the cache never shrinks while a scan is being completed',
-    );
+    assert.ok(cached >= last, 'the cache never shrinks while a scan is being completed');
+    last = cached;
 
-    if (project.complete) break;
-
-    assert.equal(project.stopped, 'index-time-limit');
-
-    if (cached > last) {
-      last = cached;
+    if (project.complete) finished = true;
+    else {
+      assert.equal(project.stopped, 'index-time-limit');
+      assert.ok(project.files.length >= 1, 'every call makes progress');
     }
-
-    if (last === 80) break;
   }
 
+  assert.ok(calls > 1, 'the budget really was too small for one call');
   assert.ok(calls < 400, `the scan did not populate the cache after ${calls} calls`);
-  assert.equal(last, 80, 'all 80 files should eventually be cached');
+  assert.equal(finished, true);
+  assert.equal(last, 80, 'all 80 files are cached once the scan has completed');
 
   const finalCtx = context(root, { maxIndexMs: 600_000 });
   const finalProject = await indexProject(finalCtx);
@@ -104,19 +117,14 @@ test('repeated calls with a small budget progressively populate the cache, and a
 
 // ---- the clock starts before the preparation work -----------------------------------------------------------------------------------
 
-function slowCache(ctx: ReturnType<typeof context>, ms: number): ReturnType<typeof context> {
-  const busy = (): void => {
-    const end = performance.now() + ms;
-    while (performance.now() < end) {
-      // a slow cache load, for real: the process is occupied for `ms`
-    }
-  };
+// The cache load takes `ms` of the fake clock, instead of occupying the process for that long.
+function slowCache(ctx: ReturnType<typeof context>, onLoad: () => void): ReturnType<typeof context> {
   const db = new Proxy(ctx.db, {
     get(target, key) {
       const value = Reflect.get(target, key, target) as unknown;
       if (key !== 'prepare') return typeof value === 'function' ? value.bind(target) : value;
       return (sql: string) => {
-        if (/SELECT path, hash, size, mtime_ms, info FROM files/.test(sql)) busy();
+        if (/SELECT path, hash, size, mtime_ms, info FROM files/.test(sql)) onLoad();
         return (value as (s: string) => unknown).call(target, sql);
       };
     },
@@ -124,17 +132,24 @@ function slowCache(ctx: ReturnType<typeof context>, ms: number): ReturnType<type
   return { ...ctx, db };
 }
 
-test('preparation counts against maxIndexMs: a slow cache load leaves less time for files', async () => {
+test('preparation counts against maxIndexMs: a slow cache load leaves less time for files', async (t) => {
+  // The clock does not move by itself, so "four tiny files fit in 150 ms" is exactly true rather than usually true.
+  const clock = fakeClock(t, 0);
   const root = workspace(many(4));
-  // Without a slow load, four tiny files fit comfortably in 150 ms.
   const normal = await indexProject(context(root, { maxIndexMs: 150 }));
   assert.equal(normal.complete, true);
   assert.equal(normal.stopped, undefined);
 
   // The same budget, but loading the cache takes 400 ms. The clock started before that, so only the first file of the call is handled.
-  const slow = await indexProject(slowCache(context(workspace(many(4)), { maxIndexMs: 150 }), 400));
+  const slow = await indexProject(slowCache(context(workspace(many(4)), { maxIndexMs: 150 }), () => clock.jump(400)));
   assert.equal(slow.stopped, 'index-time-limit');
   assert.equal(slow.complete, false);
   assert.equal(slow.files.length, 1, 'the budget was already spent when the first file was reached');
   assert.equal(slow.unindexed, 3);
+});
+
+test('the same scan with a real clock still completes inside a generous budget', async () => {
+  const project = await indexProject(context(workspace(many(4)), { maxIndexMs: 600_000 }));
+  assert.equal(project.complete, true);
+  assert.equal(project.stopped, undefined);
 });

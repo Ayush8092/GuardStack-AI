@@ -3,11 +3,15 @@ import { analyze, analyzeProject, type Analysis, type Finding } from '../ast/ana
 import { languageOf, type Project } from '../ast/indexer.js';
 import { loadLanguages, parseFile } from '../ast/parser.js';
 import type { FileInfo } from '../ast/types.js';
+import { createPacer } from '../../utils/pace.js';
 import { collectChanges, detectRepo, readBlob, type Change } from '../git/git.js';
 import { compareText } from '../../utils/text.js';
 import { TSCONFIG_NAME } from '../ast/tsconfig.js';
-import { configFileName } from '../../utils/config.js';
+import { configFileName, effectiveLimit } from '../../utils/config.js';
 import { reconstructBaseline, type BaselineRules } from './baseline.js';
+import { assessPolicy, excludedFiles, loweredSeverities, type ConfigDowngrade } from './policy.js';
+
+export type { ConfigDowngrade } from './policy.js';
 
 export type Introduced = Finding & { inChangedFile: boolean };
 
@@ -29,8 +33,14 @@ export type Validation = {
   baseLabel?: string;
   changes: Change[];
   introduced: Introduced[];
+  // Fixed by the code: gone with no weakening of the project's own configuration to explain it.
   fixed: Finding[];
   existing: Finding[];
+  // Ways this change weakened the analysis itself (rules turned off or lowered, ignore patterns, exceptions, entry points,
+  // files no longer analysed), found by comparing the configuration at the base commit with the working tree.
+  configDowngrades: ConfigDowngrade[];
+  // Findings that were there at the base and are gone only because of a downgrade above. They are NOT fixed.
+  suppressedByPolicy: Finding[];
   // True when the baseline could not be rebuilt completely. Introduced and fixed are then provisional.
   partial: boolean;
   partialReasons: string[];
@@ -92,8 +102,9 @@ const basePathOf = (change: Change): string => (change.status === 'renamed' && c
 // Rebuilds the project as it was at `sha`: the files tracked then, parsed from their content then, resolved with
 // the tsconfig, ignore rules and path aliases that existed then. A renamed file comes back at its ORIGINAL path, so
 // every import that pointed at it in the base still resolves, and its findings are matched to the new path by identity.
-async function buildBaseline(ctx: Ctx, project: Project, evaluated: Change[], overflow: Change[], sha: string, limit: number): Promise<Baseline> {
-  const maxBytes = ctx.config.maxFileKb * 1024;
+async function buildBaseline(ctx: Ctx, project: Project, evaluated: Change[], overflow: Change[], sha: string, limit: number, signal?: AbortSignal): Promise<Baseline> {
+  const pacer = createPacer({ signal });
+  const maxBytes = effectiveLimit(ctx.config, 'maxFileKb') * 1024;
   const current = new Map(project.files.map((f) => [f.path, f]));
   const files = new Map<string, FileInfo>();
   const skipped: SkippedFile[] = overflow.map((c) => ({ path: c.path, reason: 'over-limit' }));
@@ -101,15 +112,17 @@ async function buildBaseline(ctx: Ctx, project: Project, evaluated: Change[], ov
   const renames = new Map<string, string>();
   let reads = 0;
 
-  const rules = await reconstructBaseline(ctx, sha, project);
+  const rules = await reconstructBaseline(ctx, sha, project, signal);
   if (rules) notes.push(...rules.notes);
   else notes.push('The file list and configuration at the base commit could not be read; they were approximated from the working tree.');
 
   const restore = async (rel: string): Promise<void> => {
     const lang = languageOf(rel);
     if (!lang) return;
+    // Cancellation and the event loop: one file per tick, so a long baseline neither ignores a cancel nor blocks other requests.
+    await pacer.tick();
     reads++;
-    const blob = await readBlob(ctx.root, sha, rel, maxBytes);
+    const blob = await readBlob(ctx.root, sha, rel, maxBytes, signal);
     if (!blob.ok) {
       skipped.push({ path: rel, reason: blob.reason === 'too-large' ? 'baseline-too-large' : 'baseline-unreadable' });
       return;
@@ -173,7 +186,7 @@ async function buildBaseline(ctx: Ctx, project: Project, evaluated: Change[], ov
   };
 }
 
-export type ValidateOptions = { base?: string; maxChangedFiles?: number };
+export type ValidateOptions = { base?: string; maxChangedFiles?: number; signal?: AbortSignal };
 
 export async function validateChanges(ctx: Ctx, project: Project, current: Analysis, options: ValidateOptions = {}): Promise<Validation> {
   const limit = options.maxChangedFiles ?? MAX_CHANGED_FILES;
@@ -193,15 +206,17 @@ export async function validateChanges(ctx: Ctx, project: Project, current: Analy
     introduced: current.findings.map((f) => ({ ...f, inChangedFile: false })),
     fixed: [],
     existing: [],
+    configDowngrades: [],
+    suppressedByPolicy: [],
     partial: !project.complete,
     partialReasons: indexReasons(),
     baselineNotes: [],
   });
 
-  const repo = await detectRepo(ctx.root);
+  const repo = await detectRepo(ctx.root, options.signal);
   if (!repo.ok) return whole(`${FALLBACKS[repo.reason]}, so existing findings cannot be told apart from new ones`);
 
-  const set = await collectChanges(ctx.root, repo, options.base);
+  const set = await collectChanges(ctx.root, repo, options.base, options.signal);
   const relevant = set.changes.filter((c) => languageOf(c.path) || (c.oldPath && languageOf(c.oldPath)));
   const evaluated = relevant.slice(0, limit);
   const overflow = relevant.slice(limit);
@@ -217,11 +232,11 @@ export async function validateChanges(ctx: Ctx, project: Project, current: Analy
   const configTouched = set.changes.filter((c) => isConfigFile(c.path) || (c.oldPath !== undefined && isConfigFile(c.oldPath)));
 
   if (evaluated.length === 0 && configTouched.length === 0) {
-    return { scope: 'changes', baseLabel: set.baseLabel, changes: [], introduced: [], fixed: [], existing: current.findings, partial: !project.complete, partialReasons: indexReasons(), coverage: coverage([]), baselineNotes: [] };
+    return { scope: 'changes', baseLabel: set.baseLabel, changes: [], introduced: [], fixed: [], existing: current.findings, configDowngrades: [], suppressedByPolicy: [], partial: !project.complete, partialReasons: indexReasons(), coverage: coverage([]), baselineNotes: [] };
   }
 
   const base: Baseline = set.baseSha
-    ? await buildBaseline(ctx, project, evaluated, overflow, set.baseSha, limit)
+    ? await buildBaseline(ctx, project, evaluated, overflow, set.baseSha, limit, options.signal)
     : { files: [], known: [], skipped: [], rules: null, identify: (p) => p, notes: [] };
 
   const before = analyze(base.files, {
@@ -235,7 +250,23 @@ export async function validateChanges(ctx: Ctx, project: Project, current: Analy
     config: base.rules?.config ?? ctx.config,
   });
 
-  const { introduced, fixed, existing } = diffFindings(before.findings, current.findings, changedFiles);
+  const diff = diffFindings(before.findings, current.findings, changedFiles);
+  const { introduced, existing } = diff;
+
+  // The base configuration is only known when it could be rebuilt; without it nothing can be said about a downgrade, and the
+  // result is already marked partial below.
+  const baseRules = base.rules;
+  const policy = baseRules
+    ? assessPolicy({
+        before: baseRules.config,
+        now: ctx.config,
+        // A stopped scan has not seen every path, so an unseen file would look excluded.
+        excluded: project.stopped ? undefined : excludedFiles(baseRules.paths, project.knownPaths, set.changes),
+        fixed: diff.fixed,
+        lowered: loweredSeverities(before.findings, current.findings),
+      })
+    : { downgrades: [], suppressed: [], fixed: diff.fixed };
+  const fixed = policy.fixed;
 
   const reasons = indexReasons();
   if (overflow.length > 0) reasons.push(`${relevant.length} source files changed but only the first ${limit} were compared; the other ${overflow.length} were not restored from the base commit.`);
@@ -251,6 +282,8 @@ export async function validateChanges(ctx: Ctx, project: Project, current: Analy
     introduced,
     fixed,
     existing,
+    configDowngrades: policy.downgrades,
+    suppressedByPolicy: policy.suppressed,
     partial: reasons.length > 0,
     partialReasons: reasons,
     coverage: coverage(base.skipped),

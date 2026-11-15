@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Ctx } from '../../context.js';
 import { analyzeProject } from '../../core/ast/analysis.js';
-import { indexProject } from '../../core/ast/indexer.js';
+import { indexShared } from '../../core/ast/shared-index.js';
 import { findReusable, renderFind } from '../../core/prompt/find.js';
 import { indexNotes, reply } from './result.js';
 
@@ -24,7 +24,7 @@ export function registerFindReusable(server: McpServer, ctx: Ctx): void {
     },
     ({ query, limit }, extra) =>
       reply(async () => {
-        const project = await indexProject(ctx, { signal: extra.signal });
+        const project = await indexShared(ctx, extra.signal);
         const { graph } = analyzeProject(project, ctx.config);
         return [renderFind(findReusable(project, graph, query, limit ?? 8)), ...indexNotes(project, ctx)].join('\n\n');
       }),

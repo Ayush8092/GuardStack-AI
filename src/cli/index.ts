@@ -42,7 +42,9 @@ program
   .option('--all', 'also list pre-existing findings')
   .option('--json', 'print the result as JSON')
   .option('--fail-on <severity>', 'exit with code 1 if a new finding is at least this severe (high, medium, low)')
-  .action(async (opts: { base?: string; all?: boolean; json?: boolean; failOn?: string }) =>
+  .option('--fail-on-partial', 'exit with code 1 if the validation is partial (not every changed file or the base configuration could be compared)')
+  .option('--config-policy <policy>', 'when the change weakens the analysis configuration: warn (report, default), fail (exit 1) or approve (accept explicitly)')
+  .action(async (opts: { base?: string; all?: boolean; json?: boolean; failOn?: string; failOnPartial?: boolean; configPolicy?: string }) =>
     (await import('./commands/check.js')).check({ root: root(), ...opts }),
   );
 
@@ -64,7 +66,8 @@ program
     (await import('./commands/optimize.js')).optimize(prompt, { root: root(), llm: opts.llm, dryRun: opts.dryRun }),
   );
 
-// Exit codes, the same on every platform: 0 success, 1 the check found something (check --fail-on, doctor), 2 usage or runtime error.
+// Exit codes, the same on every platform: 0 success, 1 the check failed a requested condition (check --fail-on, --fail-on-partial,
+// --config-policy fail; doctor), 2 usage or runtime error.
 const usageExit = (err: { exitCode: number }): never => process.exit(err.exitCode === 0 ? 0 : 2);
 program.exitOverride(usageExit);
 for (const command of program.commands) command.exitOverride(usageExit);

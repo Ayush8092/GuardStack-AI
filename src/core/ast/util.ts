@@ -16,15 +16,20 @@ export function codeText(node: Node | null | undefined, source: string, end?: nu
   if (!node) return '';
   const stop = end ?? node.endIndex;
   const cuts: Range[] = [];
-  const collect = (n: Node): void => {
-    if (n.startIndex >= stop) return;
+  // Explicit stack (children pushed in reverse so comments are collected in source order): the tree can be far deeper than the call stack.
+  const pending: Node[] = [node];
+  for (let n = pending.pop(); n; n = pending.pop()) {
+    if (n.startIndex >= stop) continue;
     if (n.type === 'comment') {
       cuts.push([n.startIndex, n.endIndex]);
-      return;
+      continue;
     }
-    for (const child of n.children) if (child) collect(child);
-  };
-  collect(node);
+    const children = n.children;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const child = children[i];
+      if (child) pending.push(child);
+    }
+  }
 
   let out = '';
   let pos = node.startIndex;
@@ -76,12 +81,25 @@ export function structuralHash(parts: (Node | null)[], isDeclared: (node: Node) 
   const rename = new Map<string, number>();
   const tokens: string[] = [];
 
-  const visit = (node: Node): void => {
-    if (SKIPPED.has(node.type)) return;
+  const CLOSE = Symbol('close');
+  // Explicit stack: a node is followed by a CLOSE marker so the closing token lands after its last descendant, exactly where
+  // a recursive walk would emit it. Children are pushed in reverse to keep source order.
+  const pending: (Node | typeof CLOSE)[] = [];
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i];
+    if (part) pending.push(part);
+  }
+  for (let item = pending.pop(); item !== undefined; item = pending.pop()) {
+    if (item === CLOSE) {
+      tokens.push(')');
+      continue;
+    }
+    const node = item;
+    if (SKIPPED.has(node.type)) continue;
     const literal = LITERAL_TOKENS[node.type];
     if (literal) {
       tokens.push(literal);
-      return;
+      continue;
     }
     if (node.childCount === 0) {
       if (node.type === 'identifier' || node.type === 'shorthand_property_identifier' || node.type === 'shorthand_property_identifier_pattern') {
@@ -97,13 +115,16 @@ export function structuralHash(parts: (Node | null)[], isDeclared: (node: Node) 
       } else {
         tokens.push(node.type);
       }
-      return;
+      continue;
     }
     tokens.push(`(${node.type}`);
-    for (const child of node.children) if (child) visit(child);
-    tokens.push(')');
-  };
-  for (const part of parts) if (part) visit(part);
+    pending.push(CLOSE);
+    const children = node.children;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const child = children[i];
+      if (child) pending.push(child);
+    }
+  }
 
   if (tokens.length < MIN_STRUCT_TOKENS) return undefined;
   return createHash('sha1').update(tokens.join(' ')).digest('hex').slice(0, 12);

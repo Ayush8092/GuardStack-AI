@@ -1,24 +1,39 @@
 import type { Node } from '@vscode/tree-sitter-wasm';
 import { kids, text } from './util.js';
 
+// Iterative: a destructuring pattern can be nested as deep as the file allows. Names come out in source order.
 export function patternNames(node: Node | null | undefined): string[] {
-  if (!node) return [];
-  switch (node.type) {
-    case 'identifier':
-    case 'shorthand_property_identifier_pattern':
-      return [node.text];
-    case 'object_pattern':
-    case 'array_pattern':
-    case 'rest_pattern':
-      return kids(node).flatMap(patternNames);
-    case 'pair_pattern':
-      return patternNames(node.childForFieldName('value'));
-    case 'assignment_pattern':
-    case 'object_assignment_pattern':
-      return patternNames(node.childForFieldName('left'));
-    default:
-      return [];
+  const names: string[] = [];
+  const pending: Node[] = node ? [node] : [];
+  for (let current = pending.pop(); current; current = pending.pop()) {
+    switch (current.type) {
+      case 'identifier':
+      case 'shorthand_property_identifier_pattern':
+        names.push(current.text);
+        break;
+      case 'object_pattern':
+      case 'array_pattern':
+      case 'rest_pattern': {
+        const children = kids(current);
+        for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
+        break;
+      }
+      case 'pair_pattern': {
+        const value = current.childForFieldName('value');
+        if (value) pending.push(value);
+        break;
+      }
+      case 'assignment_pattern':
+      case 'object_assignment_pattern': {
+        const left = current.childForFieldName('left');
+        if (left) pending.push(left);
+        break;
+      }
+      default:
+        break;
+    }
   }
+  return names;
 }
 
 const FUNCTION_LIKE = new Set([

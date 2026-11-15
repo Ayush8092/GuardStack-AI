@@ -8,7 +8,7 @@ import type { Lang } from './types.js';
 export type Candidate = { rel: string; lang: Lang; size: number; mtimeMs: number };
 
 // Why discovery stopped before the whole tree was seen. Absent means every directory was visited.
-export type DiscoveryStop = 'entry-limit' | 'time-limit';
+export type DiscoveryStop = 'entry-limit' | 'time-limit' | 'memory-limit';
 
 export type Walk = {
   eligible: Candidate[];
@@ -38,6 +38,9 @@ export type Walk = {
   listed: number;
   entries: number;
   peakListingBuffer: number;
+  // The memory budget and the most the discovery algorithm was estimated to hold at one moment (see "Memory model" below). It is a
+  // deterministic estimate computed from names and counts, never a measurement of the heap, and it never exceeds `limitBytes`.
+  memory: { limitBytes: number; peakEstimatedBytes: number };
   stopped?: DiscoveryStop;
 };
 
@@ -68,7 +71,65 @@ export type WalkEnv = {
   isSensitive: (rel: string) => boolean;
 };
 
-export type WalkLimits = { maxEntries: number; maxMs: number; signal?: AbortSignal };
+export type WalkLimits = {
+  maxEntries: number;
+  maxMs: number;
+  // Budget for the estimated memory of the walk (see "Memory model"). Absent: DEFAULT_DISCOVERY_MEMORY_BYTES. Never above
+  // MAX_DISCOVERY_MEMORY_BYTES, whatever the caller passes.
+  maxMemoryBytes?: number;
+  signal?: AbortSignal;
+};
+
+// ---- Memory model --------------------------------------------------------------------------------------------------------------
+//
+// An entry-count limit alone says nothing about memory: a million entries with 255-character names hold several times what a million
+// short names do. Discovery therefore keeps a running ESTIMATE of what it holds and stops, reporting 'memory-limit', before the
+// estimate would pass the budget. The estimate is computed from names and counts only (never from the heap), so the same directory
+// content gives the same estimate on every run. The constants below were measured on V8 (64-bit, no pointer compression) and rounded
+// UP; names are charged at two bytes per UTF-16 unit, the worst case for a string.
+//   listing item   {name, kind} object + string header + array slot             ITEM_FIXED_BYTES + 2 * name.length  (measured <= 66 + 2n)
+//   path string    a retained relative path (pending directories, result lists)  STRING_FIXED_BYTES + 2 * length      (measured <= 40 + 2n)
+//   candidate      {rel, lang, size, mtimeMs} + its path + allowance for the     CANDIDATE_FIXED_BYTES + 2 * length  (measured <= 82 + 2n)
+//                  final sort of `eligible`
+//   sorting        while a listing buffer is sorted or merged, the original array, the runs and the merge output are alive together
+//                  (three pointer arrays) plus garbage not yet collected; SORT_BYTES_PER_ENTRY is reserved for EVERY buffered entry
+//                  at all times, so a sort is always affordable when it is needed.
+//   fixed          directory read batches (1024 Dirents), the result object, the pacer: FIXED_OVERHEAD_BYTES.
+// What is charged: the listing buffer of the directory being read (and, once read, its entries until the directory is processed),
+// the sort allowance for them, the directories still to visit, `eligible` and every other retained result list.
+// What is not: the memory of the rest of the process, and the allocations of one file system call.
+export const ITEM_FIXED_BYTES = 80;
+export const STRING_FIXED_BYTES = 40;
+export const CANDIDATE_FIXED_BYTES = 128;
+export const SORT_BYTES_PER_ENTRY = 48;
+export const FIXED_OVERHEAD_BYTES = 1024 * 1024;
+export const DEFAULT_DISCOVERY_MEMORY_BYTES = 128 * 1024 * 1024;
+export const MAX_DISCOVERY_MEMORY_BYTES = 256 * 1024 * 1024;
+export const estimateItemBytes = (name: string): number => ITEM_FIXED_BYTES + 2 * name.length;
+export const estimatePathBytes = (rel: string): number => STRING_FIXED_BYTES + 2 * rel.length;
+export const estimateCandidateBytes = (rel: string): number => CANDIDATE_FIXED_BYTES + 2 * rel.length;
+
+class MemoryMeter {
+  readonly limit: number;
+  // Directories still to visit and every retained result.
+  retained = FIXED_OVERHEAD_BYTES;
+  // Entries of the directory being processed, after it was listed.
+  listing = 0;
+  peak = FIXED_OVERHEAD_BYTES;
+  constructor(limit: number) {
+    this.limit = Number.isFinite(limit) ? Math.min(Math.max(limit, 0), MAX_DISCOVERY_MEMORY_BYTES) : DEFAULT_DISCOVERY_MEMORY_BYTES;
+  }
+  get total(): number {
+    return this.retained + this.listing;
+  }
+  fits(extra: number): boolean {
+    return this.total + extra <= this.limit;
+  }
+  observe(extra = 0): void {
+    const now = this.total + extra;
+    if (now > this.peak) this.peak = now;
+  }
+}
 
 // What is kept of a directory entry while it is listed: the name and its kind, nothing else. A fs.Dirent also carries the
 // parent path and other fields, which for a directory of hundreds of thousands of files is memory that is never used.
@@ -220,6 +281,8 @@ async function openVerifiedDirectory(rootReal: string, abs: string): Promise<Ope
 
 // Thrown by the checkpoint while a directory is being listed or sorted, when maxMs has run out.
 const OUT_OF_TIME = Symbol('discovery-out-of-time');
+// Thrown while a directory is being listed when what has to be held would pass the memory budget.
+const OUT_OF_MEMORY = Symbol('discovery-out-of-memory');
 
 type ListStats = { listed: number; peakListingBuffer: number };
 
@@ -231,12 +294,33 @@ type ListStats = { listed: number; peakListingBuffer: number };
 // `keep` in name order, which is all the entry limit can ever reach. Once `keep` names have been collected, the largest of
 // them is a cutoff: an entry that sorts after it can never be selected and is dropped on arrival instead of buffered. The
 // buffer is sorted and cut back to `keep` whenever it grows by half of `keep` (at least 8192), so its size stays within
-// `1.5 * keep + 8192` however large the directory is, and in the usual case stays close to `keep`.
+// `1.5 * keep + 8192` entries however large the directory is, and in the usual case stays close to `keep`.
 // The selection is exactly the first `keep` names in name order, whatever order the file system lists them in.
-async function listDirectory(rootReal: string, abs: string, keep: number, checkpoint: Checkpoint, stats: ListStats): Promise<Item[]> {
+//
+// The buffer is also bounded in BYTES (see "Memory model"). Before an entry is buffered, the estimate of the buffer, its sort
+// allowance and the rest of the walk must fit the budget. If it does not, the buffer is cut back early when that frees at least
+// MIN_RECLAIM entries (so a sort is never repeated for a handful of entries). If that is not possible either, the directory cannot
+// be selected from within the budget: OUT_OF_MEMORY is thrown and nothing from this directory is used. Nothing is dropped silently:
+// the caller reports 'memory-limit'.
+async function listDirectory(rootReal: string, abs: string, keep: number, checkpoint: Checkpoint, stats: ListStats, meter: MemoryMeter): Promise<{ items: Item[]; bytes: number }> {
   const trimAt = keep + Math.max(keep >> 1, 8192);
+  const minReclaim = Math.max(8192, keep >> 3);
   let buffer: Item[] = [];
+  let bufferBytes = 0;
   let cutoff: string | undefined;
+  const sizeOf = (items: Item[]): number => {
+    let total = 0;
+    for (const item of items) total += estimateItemBytes(item.name);
+    return total;
+  };
+  const trim = async (): Promise<void> => {
+    buffer = await sortEntries(buffer, checkpoint);
+    if (buffer.length > keep) buffer.length = keep;
+    bufferBytes = sizeOf(buffer);
+    if (buffer.length === keep) cutoff = buffer[keep - 1].name;
+  };
+  // Bytes held if one more entry of `cost` is buffered: the buffer, the item, and the sort allowance for all of them.
+  const needed = (cost: number): number => bufferBytes + cost + SORT_BYTES_PER_ENTRY * (buffer.length + 1);
   const opened = await openVerifiedDirectory(rootReal, abs);
   let seen = 0;
   try {
@@ -244,13 +328,19 @@ async function listDirectory(rootReal: string, abs: string, keep: number, checkp
       stats.listed++;
       if ((++seen & 255) === 0) await checkpoint();
       if (cutoff !== undefined && compareText(entry.name, cutoff) > 0) continue;
-      buffer.push({ name: entry.name, kind: kindOf(entry) });
-      if (buffer.length > stats.peakListingBuffer) stats.peakListingBuffer = buffer.length;
-      if (buffer.length >= trimAt) {
-        buffer = await sortEntries(buffer, checkpoint);
-        buffer.length = Math.min(buffer.length, keep);
-        if (buffer.length === keep) cutoff = buffer[keep - 1].name;
+      const cost = estimateItemBytes(entry.name);
+      if (!meter.fits(needed(cost))) {
+        const before = buffer.length;
+        if (before > keep) await trim();
+        // The cutoff may have just been set or lowered: an entry beyond it is not wanted after all.
+        if (cutoff !== undefined && compareText(entry.name, cutoff) > 0) continue;
+        if (before - buffer.length < minReclaim || !meter.fits(needed(cost))) throw OUT_OF_MEMORY;
       }
+      buffer.push({ name: entry.name, kind: kindOf(entry) });
+      bufferBytes += cost;
+      meter.observe(bufferBytes + SORT_BYTES_PER_ENTRY * buffer.length);
+      if (buffer.length > stats.peakListingBuffer) stats.peakListingBuffer = buffer.length;
+      if (buffer.length >= trimAt) await trim();
     }
     // Everything listed is only trusted if the path still leads to the directory that was opened.
     opened.verify();
@@ -259,7 +349,7 @@ async function listDirectory(rootReal: string, abs: string, keep: number, checkp
   }
   buffer = await sortEntries(buffer, checkpoint);
   if (buffer.length > keep) buffer.length = keep;
-  return buffer;
+  return { items: buffer, bytes: sizeOf(buffer) };
 }
 
 // Directories are visited in sorted order, so which entries are seen before a limit is hit does not depend on the
@@ -267,7 +357,15 @@ async function listDirectory(rootReal: string, abs: string, keep: number, checkp
 // The deadline is enforced while a directory is listed, sorted and processed entry by entry, not only between
 // directories, and the walk hands the event loop back regularly and throws the signal's reason when cancelled.
 export async function walk(env: WalkEnv, limits: WalkLimits): Promise<Walk> {
-  const result: Walk = { eligible: [], oversized: [], unreadableDirs: [], configs: [], manifests: [], legacy: [], foreign: new Set(), unclassified: [], replacedDirs: [], vanished: [], listed: 0, entries: 0, peakListingBuffer: 0 };
+  const result: Walk = { eligible: [], oversized: [], unreadableDirs: [], configs: [], manifests: [], legacy: [], foreign: new Set(), unclassified: [], replacedDirs: [], vanished: [], listed: 0, entries: 0, peakListingBuffer: 0, memory: { limitBytes: 0, peakEstimatedBytes: 0 } };
+  const meter = new MemoryMeter(limits.maxMemoryBytes ?? DEFAULT_DISCOVERY_MEMORY_BYTES);
+  result.memory.limitBytes = meter.limit;
+  // Every retained string is charged when it is stored, so the budget covers the result lists as well as the pending directories.
+  const retainPath = (list: string[], rel: string): void => {
+    list.push(rel);
+    meter.retained += estimatePathBytes(rel);
+    meter.observe();
+  };
   const pacer = createPacer({ signal: limits.signal });
   const deadline = performance.now() + limits.maxMs;
   const timeUp = (): boolean => performance.now() > deadline;
@@ -292,21 +390,30 @@ export async function walk(env: WalkEnv, limits: WalkLimits): Promise<Walk> {
     }
 
     const dir = pending.pop() as string;
+    if (dir) meter.retained -= estimatePathBytes(dir);
     let entries: Item[];
     try {
       // One more than the budget left, so that exceeding the entry limit is still detected after trimming.
-      entries = await listDirectory(rootReal, path.join(rootReal, dir), limits.maxEntries - result.entries + 1, checkpoint, result);
+      const listed = await listDirectory(rootReal, path.join(rootReal, dir), limits.maxEntries - result.entries + 1, checkpoint, result, meter);
+      entries = listed.items;
+      meter.listing = listed.bytes;
+      meter.observe();
     } catch (err) {
       if (err === OUT_OF_TIME) {
         result.stopped = 'time-limit';
         break;
       }
+      // The directory could not be selected from within the budget. Nothing of it is used, and the scan says it stopped.
+      if (err === OUT_OF_MEMORY) {
+        result.stopped = 'memory-limit';
+        break;
+      }
       // Cancellation is never reported as an unreadable directory.
       if (limits.signal?.aborted) throw err;
-      if (err instanceof DirectoryReplaced) result.replacedDirs.push(dir || '.');
+      if (err instanceof DirectoryReplaced) retainPath(result.replacedDirs, dir || '.');
       // A subdirectory that no longer exists was removed during the scan: nothing is hidden by that. A root that cannot be read is a gap.
-      else if (codeOf(err) === 'ENOENT' && dir !== '') result.vanished.push(dir);
-      else result.unreadableDirs.push(dir || '.');
+      else if (codeOf(err) === 'ENOENT' && dir !== '') retainPath(result.vanished, dir);
+      else retainPath(result.unreadableDirs, dir || '.');
       continue;
     }
 
@@ -322,10 +429,16 @@ export async function walk(env: WalkEnv, limits: WalkLimits): Promise<Walk> {
         result.stopped = 'entry-limit';
         break scan;
       }
+      const rel = dir ? `${dir}/${entry.name}` : entry.name;
+      // Room for the most one entry can retain (a candidate, plus its path in `legacy`) before it is looked at. Like the entry limit,
+      // the entry that does not fit is not processed and not counted; everything before it, in sorted order, is.
+      if (!meter.fits(estimateCandidateBytes(rel) + estimatePathBytes(rel))) {
+        result.stopped = 'memory-limit';
+        break scan;
+      }
       result.entries++;
       if ((++sinceTick & 31) === 0) await pacer.tick();
       if (entry.kind === SYMLINK) continue;
-      const rel = dir ? `${dir}/${entry.name}` : entry.name;
 
       let kind = entry.kind;
       if (kind === UNKNOWN) {
@@ -334,30 +447,34 @@ export async function walk(env: WalkEnv, limits: WalkLimits): Promise<Walk> {
         } catch (err) {
           // ENOENT: it was removed after it was listed. Any other error (permissions, I/O): neither the listing nor lstat could say what
           // this is, so it cannot be ruled out as a source file or a directory.
-          if (codeOf(err) === 'ENOENT') result.vanished.push(rel);
-          else result.unclassified.push(rel);
+          if (codeOf(err) === 'ENOENT') retainPath(result.vanished, rel);
+          else retainPath(result.unclassified, rel);
           continue;
         }
         if (kind === SYMLINK) continue;
       }
 
       if (kind === DIRECTORY) {
-        if (!env.ignores(`${rel}/`)) subdirs.push(rel);
+        if (!env.ignores(`${rel}/`)) {
+          subdirs.push(rel);
+          meter.retained += estimatePathBytes(rel);
+          meter.observe();
+        }
         continue;
       }
       if (kind !== FILE || env.ignores(rel)) continue;
 
       if (env.isTsConfig(entry.name)) {
-        result.configs.push(rel);
+        retainPath(result.configs, rel);
         continue;
       }
       if (entry.name === 'package.json' || entry.name === 'pyproject.toml') {
-        result.manifests.push(rel);
+        retainPath(result.manifests, rel);
         continue;
       }
       // setup.cfg / setup.py can declare console entry points that are not read; setup.py is still indexed as source.
       if (entry.name === 'setup.cfg' || entry.name === 'setup.py') {
-        result.legacy.push(rel);
+        retainPath(result.legacy, rel);
         if (entry.name === 'setup.cfg') continue;
       }
 
@@ -374,26 +491,31 @@ export async function walk(env: WalkEnv, limits: WalkLimits): Promise<Walk> {
       } catch (err) {
         // A source file that cannot be examined is never dropped silently: ENOENT means it is gone (recorded, no gap); anything else
         // (permissions, I/O error) means it may be a source file the scan could not see, and the scan is reported as partial.
-        if (codeOf(err) === 'ENOENT') result.vanished.push(rel);
-        else result.unclassified.push(rel);
+        if (codeOf(err) === 'ENOENT') retainPath(result.vanished, rel);
+        else retainPath(result.unclassified, rel);
         continue;
       }
       // Listed as a file, no longer one: replaced by a link or a directory since. It is not followed, and the scan says it did not see it.
       if (!stat.isFile()) {
-        result.unclassified.push(rel);
+        retainPath(result.unclassified, rel);
         continue;
       }
       if (stat.size === 0) continue;
       if (stat.size > env.maxBytes) {
-        result.oversized.push(rel);
+        retainPath(result.oversized, rel);
         continue;
       }
       result.eligible.push({ rel, lang, size: stat.size, mtimeMs: Math.floor(stat.mtimeMs) });
+      meter.retained += estimateCandidateBytes(rel);
+      meter.observe();
     }
+    // The directory is done: its entries are no longer held.
+    meter.listing = 0;
     // Reversed so that popping from the end visits subdirectories in sorted order.
     for (let i = subdirs.length - 1; i >= 0; i--) pending.push(subdirs[i]);
   }
 
+  result.memory.peakEstimatedBytes = meter.peak;
   result.eligible.sort((a, b) => compareText(a.rel, b.rel));
   result.oversized.sort(compareText);
   result.unreadableDirs.sort(compareText);

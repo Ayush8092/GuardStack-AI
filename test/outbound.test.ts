@@ -208,3 +208,41 @@ test('a masking failure or a custom-pattern timeout never lets raw text reach th
     configureMasking({ literals: [], patterns: [] });
   }
 });
+
+// ---- the external request is cut once, and everything derived from it follows the cut ----
+
+test('an acceptance criterion beyond the cut-off is not transmitted when the request is truncated', async () => {
+  const root = workspace({ 'src/date.ts': 'export function formatDate(d: Date) { return d.toISOString(); }\n', 'src/main.ts': "import { formatDate } from './date';\nformatDate(new Date());\n" });
+  const ctx = context(root);
+  const indexed = await indexProject(ctx);
+  const { graph } = analyzeProject(indexed, ctx.config);
+
+  const early = '- The formatter must never throw on an invalid date, EARLYCRITERION.';
+  const hidden = 'The migration must keep the codename SILVERFOX-7741 out of every log line.';
+  const filler = 'Background notes about the date helper and where it is used today. '.repeat(100);
+  const request = `Add a date formatter.\nAcceptance criteria:\n${early}\n\n${filler}\n\nAcceptance criteria:\n- ${hidden}\n`;
+  assert.ok(request.length > 6000 && request.length < MAX_PROMPT_CHARS, `test input is ${request.length} characters`);
+  assert.ok(request.indexOf('SILVERFOX') > 6000, 'the sensitive criterion has to sit after the cut-off');
+
+  const refined = await refinePrompt(ctx, indexed, graph, request, { mode: 'external', reason: 'enabled' }, { dryRun: true });
+  assert.equal(refined.payloadTruncated, true);
+  assert.ok(refined.payload, 'a dry run builds the payload');
+  assert.ok(!refined.payload.prompt.includes('SILVERFOX'), 'text beyond the cut-off, in any section, was transmitted');
+  assert.ok(refined.payload.prompt.includes('EARLYCRITERION'), 'a criterion inside the sent part is still sent');
+  assert.match(describeLlm(refined), /Only the first part of a long request was sent externally/);
+
+  // The developer's own prompt is unchanged: the full request, including the late criterion, stays in the local output.
+  assert.ok(refined.text.includes('SILVERFOX-7741'));
+  assert.ok(refined.criteria >= 2);
+});
+
+test('a request within the limit is sent whole, with every criterion', async () => {
+  const root = workspace({ 'src/date.ts': 'export function formatDate(d: Date) { return d.toISOString(); }\n' });
+  const ctx = context(root);
+  const indexed = await indexProject(ctx);
+  const { graph } = analyzeProject(indexed, ctx.config);
+
+  const refined = await refinePrompt(ctx, indexed, graph, 'Add a date formatter.\n- It must never throw on an invalid date, SHORTCRITERION.\n', { mode: 'external', reason: 'enabled' }, { dryRun: true });
+  assert.equal(refined.payloadTruncated, false);
+  assert.match(refined.payload?.prompt ?? '', /SHORTCRITERION/);
+});

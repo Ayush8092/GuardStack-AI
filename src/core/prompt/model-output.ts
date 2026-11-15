@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { FileInfo } from '../ast/types.js';
 import { maskSecrets } from '../security/masker.js';
-import { hasHiddenText } from '../../utils/text.js';
+import { hasHiddenText, scrubRepositoryText } from '../../utils/text.js';
+import { neutralizeTags, promptText } from './untrusted.js';
 
 const text = (max: number) => z.string().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/, 'control characters are not allowed');
 
@@ -103,19 +104,31 @@ export function validateModelAnswer(raw: string, files: FileInfo[], request: str
     return null;
   };
 
+  // Invisible, reordering or line-breaking characters: never echoed, even when the repository really has such a name.
+  const invisible = (value: string): boolean => scrubRepositoryText(value) !== value;
+
   const rejections: Rejection[] = [];
   const reject = (text: string, reason: RejectReason): void => {
-    rejections.push({ text: text.slice(0, 80), reason });
+    // The dropped text is the model's own: it is scrubbed here so no caller can print hidden characters from it.
+    rejections.push({ text: promptText(text.slice(0, 80)), reason });
   };
 
   const seen = new Set<string>();
   const reuse: VerifiedReuse[] = [];
   for (const entry of parsed.data.reuse) {
+    // The path is model output, so it is untrusted until it equals an indexed path exactly. Only the indexed path is ever rendered.
+    if (invisible(entry.file)) {
+      reject(`${entry.symbol} in ${entry.file}`, 'unsafe-content');
+      continue;
+    }
     const file = byPath.get(clean(entry.file));
     const sym = file?.symbols.find((s) => s.name === entry.symbol || s.exportName === entry.symbol);
     const why = problem(entry.why);
     if (!file || !sym) {
       reject(`${entry.symbol} in ${entry.file}`, 'not-in-project');
+    } else if (invisible(file.path) || invisible(sym.name)) {
+      // Both come from the scanned repository, which a hostile project controls.
+      reject(`${entry.symbol} in ${entry.file}`, 'unsafe-content');
     } else if (why) {
       reject(`${entry.symbol} in ${entry.file}`, why);
     } else if (!seen.has(`${file.path}#${sym.name}`)) {
@@ -140,17 +153,24 @@ export function validateModelAnswer(raw: string, files: FileInfo[], request: str
 export const isEmptyNote = (note: ModelNote): boolean => note.reuse.length + note.assumptions.length + note.questions.length === 0;
 
 // The note is built here from validated fields, never copied from the reply. Two labelled parts: references that were
-// checked against the index, and commentary that is only the model's opinion.
+// checked against the index, and commentary that is only the model's opinion. Every field is still written through the
+// shared prompt escapes, so nothing in it can add a line, open a tag or hide text, whatever the caller passes in:
+// repository-derived values (symbol, path) under the repository rules, the model's wording under the request rules.
+// Line breaks, which neutralizeTags does not touch, are replaced as well: the schema forbids them, a hand-built note might not.
+const commentary = (value: string): string => neutralizeTags(value).replace(/[\u0000-\u001f\u2028\u2029]/g, '\ufffd');
+
 export function renderNote(note: ModelNote): string {
   const lines: string[] = [];
   if (note.reuse.length > 0) {
     lines.push('Verified references (each file and symbol exists in the index):');
-    for (const r of note.reuse) lines.push(`- ${r.symbol} in ${r.file}:${r.line}${r.exported ? '' : ' (not exported)'}. Model's reason: ${r.why}`);
+    for (const r of note.reuse) {
+      lines.push(`- ${promptText(r.symbol)} in ${promptText(r.file)}:${r.line}${r.exported ? '' : ' (not exported)'}. Model's reason: ${commentary(r.why)}`);
+    }
   }
   if (note.assumptions.length + note.questions.length > 0) {
     lines.push('Unverified commentary from the model (nothing in it was confirmed against your code):');
-    for (const a of note.assumptions) lines.push(`- Assumption to confirm: ${a}`);
-    for (const q of note.questions) lines.push(`- Open question: ${q}`);
+    for (const a of note.assumptions) lines.push(`- Assumption to confirm: ${commentary(a)}`);
+    for (const q of note.questions) lines.push(`- Open question: ${commentary(q)}`);
   }
   return maskSecrets(lines.join('\n')).text;
 }

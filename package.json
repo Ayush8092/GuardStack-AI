@@ -18,9 +18,11 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/dist-integrity.mjs clean && tsc && node scripts/dist-integrity.mjs write",
     "dev": "tsx src/cli/index.ts",
     "typecheck": "tsc --noEmit",
+    "verify:dist": "node scripts/dist-integrity.mjs verify",
+    "prepack": "node scripts/dist-integrity.mjs verify",
     "test": "node --import tsx --test \"test/*.test.ts\"",
     "doctor": "node bin/cli.js doctor",
     "prepublishOnly": "npm run typecheck && npm test && npm run build && node scripts/pack-smoke.mjs",

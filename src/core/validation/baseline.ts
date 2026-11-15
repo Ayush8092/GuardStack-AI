@@ -34,17 +34,47 @@ function stable(value: unknown): string {
   );
 }
 
+// Configuration files are small and the loaders that parse them are synchronous, but reading them from git must not be: every
+// synchronous `git show` blocks the event loop (no cancellation, no other request is served) and a repository can hold thousands
+// of tsconfig and package files. They are read first, asynchronously and cancellably, and the loaders then read from memory.
+// A file the loaders reach that was not read up front (an `extends` target with an unusual name) falls back to one synchronous
+// read, within a fixed budget; past it the file counts as unreadable, which the validation reports as a partial baseline.
+const PREFETCH_CONCURRENCY = 8;
+const MAX_SYNC_FALLBACKS = 32;
+
+async function prefetchConfigs(ctx: Ctx, sha: string, files: string[], signal?: AbortSignal): Promise<Map<string, string | null>> {
+  const found = new Map<string, string | null>();
+  const queue = [...new Set(files)];
+  for (let i = 0; i < queue.length; i += PREFETCH_CONCURRENCY) {
+    signal?.throwIfAborted();
+    await Promise.all(
+      queue.slice(i, i + PREFETCH_CONCURRENCY).map(async (rel) => {
+        const blob = await readBlob(ctx.root, sha, rel, MAX_CONFIG_BYTES, signal);
+        found.set(rel, blob.ok ? blob.data.toString('utf8') : null);
+      }),
+    );
+  }
+  signal?.throwIfAborted();
+  return found;
+}
+
 // Config files resolved through node_modules are not tracked by git, so those come from the working tree.
-function readerAt(ctx: Ctx, sha: string): ConfigReader {
+function readerAt(ctx: Ctx, sha: string, prefetched: Map<string, string | null>, signal?: AbortSignal): ConfigReader {
   const disk = diskReader(ctx.root);
+  let fallbacks = 0;
   return (rel) => {
     if (rel.split('/').includes('node_modules')) return disk(rel);
+    const known = prefetched.get(rel);
+    if (known !== undefined) return known;
+    signal?.throwIfAborted();
+    if (++fallbacks > MAX_SYNC_FALLBACKS) return null;
     return readAtCommitSync(ctx.root, sha, rel, MAX_CONFIG_BYTES)?.toString('utf8') ?? null;
   };
 }
 
-export async function reconstructBaseline(ctx: Ctx, sha: string, project: Pick<Project, 'tsconfigs' | 'packages'>): Promise<BaselineRules | null> {
-  const tree = await listTreeAtCommit(ctx.root, sha);
+// `signal` cancels the Git reads (the child processes are killed) and is checked again before any synchronous fallback read.
+export async function reconstructBaseline(ctx: Ctx, sha: string, project: Pick<Project, 'tsconfigs' | 'packages'>, signal?: AbortSignal): Promise<BaselineRules | null> {
+  const tree = await listTreeAtCommit(ctx.root, sha, signal);
   if (!tree) return null;
 
   const notes: string[] = [];
@@ -53,7 +83,7 @@ export async function reconstructBaseline(ctx: Ctx, sha: string, project: Pick<P
 
   let historical: Config = parseConfigText('{}');
   if (tree.includes(configFileName)) {
-    const blob = await readBlob(ctx.root, sha, configFileName, MAX_CONFIG_BYTES);
+    const blob = await readBlob(ctx.root, sha, configFileName, MAX_CONFIG_BYTES, signal);
     if (!blob.ok) {
       unreconstructable.push(`${configFileName} exists at the base commit but could not be read (${blob.reason}); defaults were used for it`);
     } else {
@@ -69,7 +99,7 @@ export async function reconstructBaseline(ctx: Ctx, sha: string, project: Pick<P
 
   let gitignoreThen = '';
   if (tree.includes('.gitignore')) {
-    const blob = await readBlob(ctx.root, sha, '.gitignore', 256 * 1024);
+    const blob = await readBlob(ctx.root, sha, '.gitignore', 256 * 1024, signal);
     if (blob.ok) gitignoreThen = blob.data.toString('utf8');
     else unreconstructable.push(`.gitignore exists at the base commit but could not be read (${blob.reason}); the files it ignored then are unknown`);
   }
@@ -78,9 +108,13 @@ export async function reconstructBaseline(ctx: Ctx, sha: string, project: Pick<P
   const paths = tree.filter((p) => sourceLanguage(p) && !filter.ignores(p)).sort(compareText);
   const configFiles = tree.filter((p) => TSCONFIG_NAME.test(p.split('/').pop() ?? '') && !filter.ignores(p));
   const packageFiles = tree.filter((p) => ['package.json', 'pyproject.toml'].includes(p.split('/').pop() ?? '') && !filter.ignores(p));
-  const reader = readerAt(ctx, sha);
+  // Read every configuration file the loaders start from now, asynchronously, so a cancel stops the git processes and the event
+  // loop stays free; the loaders below then work on memory.
+  const prefetched = await prefetchConfigs(ctx, sha, [...configFiles, ...packageFiles], signal);
+  const reader = readerAt(ctx, sha, prefetched, signal);
   const tsconfigs = loadTsConfigs(reader, configFiles);
   const packages = loadPackages(reader, packageFiles);
+  signal?.throwIfAborted();
 
   // A config file that loads today but not at the base (unreadable, invalid, or an `extends` that cannot be found)
   // leaves the baseline without aliases, references or framework signals it really had.

@@ -115,13 +115,22 @@ function toWorkspacePath(dir: string, relative: string): string | undefined {
 
 const dirOf = (file: string): string => (path.posix.dirname(file) === '.' ? '' : path.posix.dirname(file));
 
+// A package.json read from node_modules is not trusted, so the condition tree is searched depth-first (default, require, import)
+// with an explicit stack and a hard cap on depth and visited nodes, instead of recursing as deep as the file nests.
+const MAX_EXPORTS_DEPTH = 16;
+const MAX_EXPORTS_VISITED = 256;
 function exportsTarget(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  const object = asObject(value);
-  if (!object) return undefined;
-  for (const key of ['default', 'require', 'import']) {
-    const found = exportsTarget(object[key]);
-    if (found) return found;
+  const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  let visited = 0;
+  for (let entry = pending.pop(); entry; entry = pending.pop()) {
+    if (++visited > MAX_EXPORTS_VISITED) return undefined;
+    if (typeof entry.value === 'string') {
+      if (entry.value) return entry.value;
+      continue;
+    }
+    const object = asObject(entry.value);
+    if (!object || entry.depth >= MAX_EXPORTS_DEPTH) continue;
+    for (const key of ['import', 'require', 'default']) pending.push({ value: object[key], depth: entry.depth + 1 });
   }
   return undefined;
 }

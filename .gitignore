@@ -25,3 +25,10 @@ Thumbs.db
 eval/out/
 eval/repos/
 eval/.tools/
+
+# captured test output (generated, never part of a release)
+test-report*.txt
+
+# Local diagnostic artifacts
+process-debug.txt
+probe-fake-git.mjs

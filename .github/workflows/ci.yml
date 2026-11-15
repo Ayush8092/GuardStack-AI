@@ -37,6 +37,23 @@ jobs:
       - run: npm run build
       - run: node bin/cli.js doctor
       - run: npm test
+      # The Windows-only tests (process-tree termination, ACL checks) are skipped everywhere else and a skipped test is reported as a
+      # pass. This step runs them again on Windows and fails unless each required one actually ran and passed; the TAP output is kept
+      # as the evidence.
+      - name: Windows evidence (process tree, ACLs) must run, not skip
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          node --import tsx --test --test-reporter=tap test/process-safety-windows.test.ts test/cache-key-windows.test.ts > "$RUNNER_TEMP/windows-evidence.tap"
+          cat "$RUNNER_TEMP/windows-evidence.tap"
+          node scripts/assert-windows-evidence.mjs "$RUNNER_TEMP/windows-evidence.tap"
+      - name: keep the Windows evidence
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-evidence-node${{ matrix.node }}
+          path: ${{ runner.temp }}/windows-evidence.tap
+          if-no-files-found: warn
       # tests must not leave generated files behind in the working tree
       - name: working tree is clean
         shell: bash

@@ -61,6 +61,20 @@ function probeLink(type: 'dir' | 'file' | 'junction'): string | false {
 
 export const fileSymlinksWork = probeLink('file');
 
+// Same shape as the symlink probes: false when hard links can be created here, otherwise the reason to skip.
+export const hardLinksWork: string | false = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guardian-hardlink-probe-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'a'), 'x');
+    fs.linkSync(path.join(dir, 'a'), path.join(dir, 'b'));
+    return fs.statSync(path.join(dir, 'a')).nlink > 1 ? false : 'this file system does not report hard link counts';
+  } catch {
+    return 'this platform cannot create hard links here';
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 export const directorySymlinksWork = probeLink('dir');
 
 export const directoryLinksWork =

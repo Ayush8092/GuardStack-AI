@@ -5,13 +5,12 @@ import path from 'node:path';
 // Windows has no owner/mode bits that mean anything: a file's protection is its ACL. The machine key is only secret and
 // unmodifiable if nobody but the current user (and the accounts that can take over the machine anyway) can read or change it,
 // so on Windows the key directory and the key file are checked against their actual ACLs instead of against POSIX modes.
-//
-// The ACL is read with Windows PowerShell's Get-Acl (present on every desktop Windows, no dependency to add) as an SDDL string,
-// which uses SIDs, so the check does not depend on the language of the account names. Anything that cannot be read or parsed
-// is refused: the caller then keeps the cache in memory, as it does for every other unsafe key location.
-
+// The ACL is read through .NET's DirectorySecurity and FileSecurity APIs as an SDDL string, which uses SIDs, so the check
+// does not depend on the language of the account names. Anything that cannot be read or parsed is refused: the caller
+// then keeps the cache in memory, as it does for every other unsafe key location.
 // The principals that may hold access: the current user, the local SYSTEM account and the Administrators group (who can take
 // ownership of any file anyway), and the CREATOR OWNER / OWNER RIGHTS placeholders, which stand for the owner.
+
 const SYSTEM = 'S-1-5-18';
 const ADMINISTRATORS = 'S-1-5-32-544';
 const ALIASES: Record<string, string> = { SY: SYSTEM, BA: ADMINISTRATORS, CO: 'S-1-3-0', OW: 'S-1-3-4' };
@@ -59,13 +58,36 @@ export function currentUserSid(): string {
 
 // One SDDL string per path, in order. Paths travel in an environment variable, never inside the script text.
 export function readSddls(paths: string[]): string[] {
-  const script = "$ErrorActionPreference = 'Stop'; Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; foreach ($p in @(ConvertFrom-Json $env:GUARDIAN_ACL_PATHS)) { (Get-Acl -LiteralPath $p).Sddl }";
-  const out = run(system32(path.join('WindowsPowerShell', 'v1.0', 'powershell.exe')), ['-NoProfile', '-NonInteractive', '-Command', script], {
-    ...process.env,
-    GUARDIAN_ACL_PATHS: JSON.stringify(paths),
-  });
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$sections = [System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Access",
+    '$payload = ConvertFrom-Json -InputObject $env:GUARDIAN_ACL_PATHS',
+    'foreach ($p in $payload.paths) {',
+    '  $attributes = [System.IO.File]::GetAttributes($p)',
+    '  if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {',
+    '    $acl = [System.Security.AccessControl.DirectorySecurity]::new($p, $sections)',
+    '  } else {',
+    '    $acl = [System.Security.AccessControl.FileSecurity]::new($p, $sections)',
+    '  }',
+    '  $acl.GetSecurityDescriptorSddlForm($sections)',
+    '}',
+  ].join('; ');
+
+  const out = run(
+    system32(path.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      ...process.env,
+      GUARDIAN_ACL_PATHS: JSON.stringify({ paths }),
+    },
+  );
+
   const lines = out.split(/\r?\n/).filter((line) => line.trim() !== '');
-  if (lines.length !== paths.length) throw new Error('the access control lists could not be read');
+
+  if (lines.length !== paths.length) {
+    throw new Error('the access control lists could not be read');
+  }
+
   return lines;
 }
 

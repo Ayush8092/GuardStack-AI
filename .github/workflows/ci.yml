@@ -33,6 +33,17 @@ jobs:
           npm --version
           git --version
       - run: npm ci --ignore-scripts
+      - name: Diagnose Windows PowerShell security module
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $PSVersionTable | Format-List
+          Get-Module -ListAvailable Microsoft.PowerShell.Security |
+            Select-Object Name, Version, Path | Format-List
+          Get-Module Microsoft.PowerShell.Security |
+            Select-Object Name, Version, Path | Format-List
+          $env:PSModulePath -split ';'
+
       - run: npm run typecheck
       - run: npm run build
       - run: node bin/cli.js doctor

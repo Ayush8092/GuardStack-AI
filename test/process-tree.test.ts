@@ -69,7 +69,7 @@ async function tree(dir: string): Promise<{ child: ChildProcess; launcher: numbe
 function fakeTaskkill(dir: string, mode: 'kills-tree' | 'fails' | 'hangs' | 'lies' | 'not-found-after-kill' | 'not-found'): string {
   const file = path.join(dir, 'taskkill');
   const grand = path.join(dir, 'grandchild.pid');
-  const killTree = `kill -KILL "$(cat "${grand}")" 2>/dev/null; kill -KILL "$2" 2>/dev/null`;
+  const killTree = `grandchild="$(cat "${grand}")"; kill -KILL "$grandchild" 2>/dev/null; i=0; while [ "$i" -lt 20 ]; do state="$(ps -o stat= -p "$grandchild" 2>/dev/null | tr -d ' ')"; case "$state" in ''|Z*) break;; esac; sleep 0.01; i=$((i + 1)); done; state="$(ps -o stat= -p "$grandchild" 2>/dev/null | tr -d ' ')"; case "$state" in ''|Z*) ;; *) exit 1;; esac; kill -KILL "$2" 2>/dev/null`;
   const body: Record<typeof mode, string> = {
     'kills-tree': `${killTree}; exit 0`,
     fails: 'exit 1',

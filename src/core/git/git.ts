@@ -66,7 +66,7 @@ export type KillOptions = {
   taskkillPath?: string;
   taskkillTimeoutMs?: number;
   exitWaitMs?: number;
-  // How the synchronous path looks for the launcher after taskkill reported success (default: signal 0).
+  // How the async and synchronous paths check whether the launcher is alive (default: signal 0).
   isAlive?: (pid: number) => boolean;
 };
 
@@ -135,7 +135,7 @@ export function killProcessTree(child: ChildProcess, options: KillOptions = {}):
         void waitForExit(child, exitWait).then((gone) =>
           done(gone ? { pid, outcome: 'tree-terminated', detail: 'taskkill /T /F reported success and the launcher ended' } : degraded(child, 'taskkill reported success but the launcher is still running')),
         );
-      } else if (code === TASKKILL_NOT_FOUND && isGone(child)) {
+      } else if (code === TASKKILL_NOT_FOUND && (isGone(child) || !(options.isAlive ?? pidAlive)(pid))) {
         done({ pid, outcome: 'exited-before-kill', detail: 'the process ended before taskkill reached it' });
       } else {
         done(degraded(child, code === null ? `taskkill did not finish (${signal ?? 'terminated'}; timeout ${options.taskkillTimeoutMs ?? TASKKILL_TIMEOUT_MS} ms)` : `taskkill failed with exit code ${code}`));

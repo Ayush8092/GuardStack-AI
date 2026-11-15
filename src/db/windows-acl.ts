@@ -21,24 +21,56 @@ const ALLOW = new Set(['A', 'OA', 'XA', 'ZA']);
 const DENY = new Set(['D', 'OD', 'XD']);
 
 // null when the ACL gives nobody but trusted principals any access, otherwise what is wrong with it.
-export function aclProblem(sddl: string, userSid: string, what: string): string | null {
+export function aclProblem(
+  sddl: string,
+  userSid: string,
+  what: string,
+  localAdminSid?: string,
+): string | null {
   const match = SDDL.exec(sddl.trim());
   if (!match) return `${what} has an access control list that could not be read (no owner or no DACL)`;
-  const trusted = new Set([userSid.toUpperCase(), SYSTEM, ADMINISTRATORS, 'S-1-3-0', 'S-1-3-4']);
+
+  const trusted = new Set([
+    userSid.toUpperCase(),
+    SYSTEM,
+    ADMINISTRATORS,
+    'S-1-3-0',
+    'S-1-3-4',
+  ]);
+
   const owner = sid(match[1]).toUpperCase();
-  if (owner !== userSid.toUpperCase() && owner !== SYSTEM && owner !== ADMINISTRATORS) return `${what} is not owned by the current user (owner ${match[1]})`;
+  if (owner !== userSid.toUpperCase() && owner !== SYSTEM && owner !== ADMINISTRATORS) {
+    return `${what} is not owned by the current user (owner ${match[1]})`;
+  }
+
   // A NULL DACL (everyone has full access) has no D: section at all and was refused by the pattern above.
   const aces = [...match[2].matchAll(/\(([^()]*)\)/g)].map((m) => m[1]);
+
   for (const ace of aces) {
     const fields = ace.split(';');
     if (fields.length < 6) return `${what} has an access control entry that could not be read`;
+
     const [type, flags, , , , trustee] = fields;
+
     if (DENY.has(type)) continue;
     if (!ALLOW.has(type)) return `${what} has an access control entry of an unexpected type (${type})`;
+
     // Inherit-only entries apply to children, not to this object.
     if (/IO/.test(flags)) continue;
-    if (!trusted.has(sid(trustee).toUpperCase())) return `${what} is accessible to other users (${trustee})`;
+
+    const trusteeSid = trustee === 'LA'
+      ? localAdminSid?.toUpperCase()
+      : sid(trustee).toUpperCase();
+
+    if (!trusteeSid) {
+      return `${what} is accessible to other users (LA could not be resolved)`;
+    }
+
+    if (!trusted.has(trusteeSid)) {
+      return `${what} is accessible to other users (${trustee})`;
+    }
   }
+
   return null;
 }
 
@@ -54,6 +86,31 @@ export function currentUserSid(): string {
   const found = /"(S-1-[\d-]+)"/.exec(run(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh']));
   if (!found) throw new Error('the current user could not be identified');
   return (userSid = found[1]);
+}
+
+let localAdministratorSid: string | undefined;
+
+export function currentLocalAdministratorSid(): string {
+  if (localAdministratorSid) return localAdministratorSid;
+
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$accounts = @(Get-CimInstance Win32_UserAccount -Filter \"LocalAccount=True\" | Where-Object { $_.SID -match '-500$' })",
+    "if ($accounts.Count -ne 1) { throw 'the local Administrator account could not be identified uniquely' }",
+    "$accounts[0].SID",
+  ].join('; ');
+
+  const output = run(
+    system32(path.join('WindowsPowerShell', 'v1.0', 'powershell.exe')),
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+  ).trim();
+
+  if (!/^S-1-5-21-(?:\d+-){2}\d+-500$/.test(output)) {
+    throw new Error('the local Administrator SID could not be verified');
+  }
+
+  localAdministratorSid = output.toUpperCase();
+  return localAdministratorSid;
 }
 
 // One SDDL string per path, in order. Paths travel in an environment variable, never inside the script text.
@@ -97,9 +154,15 @@ export type WindowsAclCheck = (targets: Array<{ path: string; what: string }>) =
 export const checkWindowsAcls: WindowsAclCheck = (targets) => {
   try {
     const user = currentUserSid();
+    let localAdmin: string | undefined;
+    try {
+      localAdmin = currentLocalAdministratorSid();
+    } catch {
+      // ACLs containing LA will be refused if its SID cannot be resolved.
+    }
     const sddls = readSddls(targets.map((t) => t.path));
     for (let i = 0; i < targets.length; i++) {
-      const problem = aclProblem(sddls[i], user, targets[i].what);
+      const problem = aclProblem(sddls[i], user, targets[i].what, localAdmin);
       if (problem) return problem;
     }
     return null;

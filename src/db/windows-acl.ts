@@ -82,6 +82,16 @@ export const checkWindowsAcls: WindowsAclCheck = (targets) => {
     }
     return null;
   } catch (err) {
-    return `the permissions of ${targets.map((t) => t.what).join(' and ')} could not be verified (${err instanceof Error ? err.message.split('\n')[0] : err})`;
+    const message = err instanceof Error ? err.message.split('\n')[0] : String(err);
+    const stderr =
+      typeof err === 'object' && err !== null && 'stderr' in err
+        ? typeof err.stderr === 'string'
+          ? err.stderr
+          : Buffer.isBuffer(err.stderr)
+            ? err.stderr.toString('utf8')
+            : ''
+        : '';
+    const detail = stderr.trim().replace(/\s+/g, ' ').slice(0, 500);
+    return `the permissions of ${targets.map((t) => t.what).join(' and ')} could not be verified (${message}${detail ? `; stderr: ${detail}` : ''})`;
   }
 };

@@ -55,8 +55,24 @@ function homeDirectory(): string | undefined {
 const SYSTEM_DIRECTORIES = new Set(['/etc', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/boot', '/dev', '/proc', '/sys', '/root', '/var', '/System', '/Library', '/Applications']);
 const CREDENTIAL_DIRECTORIES = ['.ssh', '.gnupg', '.aws', '.azure', '.kube'];
 
+const CANONICAL_SYSTEM_DIRECTORIES = new Set(
+  process.platform === 'win32'
+    ? []
+    : [...SYSTEM_DIRECTORIES].flatMap((directory) => {
+        try {
+          return [canonical(directory)];
+        } catch {
+          return [];
+        }
+      }),
+);
+
 function isSystemOrCredentialDirectory(root: string, home: string | undefined): boolean {
-  if (process.platform !== 'win32' && SYSTEM_DIRECTORIES.has(root)) return true;
+  if (
+    process.platform !== 'win32' &&
+    (SYSTEM_DIRECTORIES.has(root) || CANONICAL_SYSTEM_DIRECTORIES.has(root))
+  ) return true;
+
   if (home === undefined) return false;
   return CREDENTIAL_DIRECTORIES.some((name) => isInside(path.join(home, name), root));
 }

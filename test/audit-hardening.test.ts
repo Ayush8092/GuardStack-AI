@@ -27,6 +27,10 @@ test('a system directory is refused as the workspace', { skip: process.platform 
   assert.throws(() => resolveWorkspaceRoot('/etc'), SandboxError);
 });
 
+test('canonical system directory aliases are refused as the workspace', { skip: process.platform !== 'darwin' || !fs.existsSync('/private/etc') }, () => {
+  assert.throws(() => resolveWorkspaceRoot('/private/etc'), SandboxError);
+});
+
 test('the key and credential folders of the home directory are refused, including everything below them', { skip: process.platform === 'win32' }, () => {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'guardian-home-')));
   const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };

@@ -15,7 +15,7 @@ test('credential files without a conventional extension are treated as sensitive
 });
 
 test('a project directory is still accepted as the workspace', () => {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'guardian-root-')));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'guardian-root-')));
   try {
     assert.equal(resolveWorkspaceRoot(dir), dir);
   } finally {

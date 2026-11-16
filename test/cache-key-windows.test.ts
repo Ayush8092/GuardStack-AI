@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { after, afterEach, beforeEach, test } from 'node:test';
 import { loadMachineKey } from '../src/db/cache-key.js';
-import { aclProblem, currentUserSid } from '../src/db/windows-acl.js';
+import { aclProblem, checkWindowsAcls, currentUserSid } from '../src/db/windows-acl.js';
 import { cleanup, fileSymlinksWork, hardLinksWork, workspace } from './helpers.js';
 
 // Windows ignores POSIX owners and modes, so the machine key's directory and file are checked against their ACLs. The decision
@@ -175,6 +175,8 @@ const share = (target: string): void => icacls(target, '/grant', '*S-1-1-0:(OI)(
 
 test('real Windows: a custom directory that is private to the user works', { skip: real }, () => {
   privateDir(state);
+  const aclError = checkWindowsAcls([{ path: state, what: 'test state directory' }]);
+  assert.equal(aclError, null, aclError ?? 'Expected the directory ACL to be private');
   assert.equal(loadMachineKey(workspace())?.length, 32);
   assert.equal(loadMachineKey(workspace())?.length, 32, 'and is found again');
 });

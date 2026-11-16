@@ -38,8 +38,8 @@ export function aclProblem(
     'S-1-3-4',
   ]);
 
-  const owner = sid(match[1]).toUpperCase();
-  if (owner !== userSid.toUpperCase() && owner !== SYSTEM && owner !== ADMINISTRATORS) {
+  const owner = (match[1] === 'LA' ? localAdminSid : sid(match[1]))?.toUpperCase();
+  if (!owner || (owner !== userSid.toUpperCase() && owner !== SYSTEM && owner !== ADMINISTRATORS)) {
     return `${what} is not owned by the current user (owner ${match[1]})`;
   }
 

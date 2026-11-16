@@ -41,6 +41,7 @@ test('the ACL decision: only the user, SYSTEM and Administrators may have access
   assert.equal(aclProblem(dacl(allow(USER, 'OICI'), allow('S-1-5-18', 'OICI'), allow('S-1-5-32-544', 'OICI')), USER, 'dir'), null, 'SIDs written out are the same as the aliases');
 
   const LOCAL_ADMIN = 'S-1-5-21-111-222-333-500';
+
   assert.equal(
     aclProblem(daclOwnedBy(LOCAL_ADMIN, allow(LOCAL_ADMIN), allow('LA')), LOCAL_ADMIN, 'dir', LOCAL_ADMIN),
     null,
@@ -56,6 +57,24 @@ test('the ACL decision: only the user, SYSTEM and Administrators may have access
     /accessible to other users/,
     'LA is refused when the local Administrator SID cannot be resolved',
   );
+
+  assert.equal(
+    aclProblem(daclOwnedBy('LA', allow(LOCAL_ADMIN)), LOCAL_ADMIN, 'dir', LOCAL_ADMIN),
+    null,
+    'LA owner is trusted when it resolves to the current user',
+  );
+  assert.match(
+    aclProblem(daclOwnedBy('LA', allow(USER)), USER, 'dir', 'S-1-5-21-444-555-666-500') ?? '',
+    /not owned by the current user/,
+    'LA owner is refused when it resolves to a different local Administrator',
+  );
+  assert.match(
+    aclProblem(daclOwnedBy('LA', allow(USER)), USER, 'dir') ?? '',
+    /not owned by the current user/,
+    'LA owner is refused when its SID cannot be resolved',
+  );
+
+
   assert.equal(aclProblem(dacl(allow(USER), 'A;OICIIO;GA;;;CO'), USER, 'dir'), null, 'creator-owner entries are trusted');
   assert.equal(aclProblem(dacl(allow(USER), allow('BU', 'IO')), USER, 'dir'), null, 'an inherit-only entry does not apply to this object');
   assert.equal(aclProblem(dacl(allow(USER), 'D;;FA;;;WD'), USER, 'dir'), null, 'a deny entry only removes access');

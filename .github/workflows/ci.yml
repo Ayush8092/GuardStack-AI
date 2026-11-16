@@ -77,8 +77,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          node --import tsx --test --test-reporter=tap test/process-safety-windows.test.ts test/cache-key-windows.test.ts > "$RUNNER_TEMP/windows-evidence.tap"
+          set +e
+          node --import tsx --test --test-reporter=tap test/process-safety-windows.test.ts test/cache-key-windows.test.ts > "$RUNNER_TEMP/windows-evidence.tap" 2>&1
+          test_status=$?
+          echo "=== Windows evidence TAP output ==="
           cat "$RUNNER_TEMP/windows-evidence.tap"
+
+          if [ "$test_status" -ne 0 ]; then
+            echo "Windows evidence tests exited with code $test_status"
+            exit "$test_status"
+          fi
+          echo "=== Checking required Windows evidence ==="
           node scripts/assert-windows-evidence.mjs "$RUNNER_TEMP/windows-evidence.tap"
       - name: keep the Windows evidence
         if: runner.os == 'Windows' && always()

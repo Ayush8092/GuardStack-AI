@@ -26,6 +26,7 @@ export type Refined = {
   policy: Policy;
   provider: string | null;
   redactions: number;
+  dryRunRedactions: number;
   reused: number;
   // True when retrieval ran and nothing matched strongly; the output says so instead of listing guesses as reuse candidates.
   noConfidentMatch: boolean;
@@ -111,6 +112,7 @@ export async function refinePrompt(ctx: Ctx, project: Project, graph: Graph, inp
   let payload: Outbound | undefined;
   let payloadTruncated = false;
   let redactions = request.count;
+  let dryRunRedactions = 0;
   let modelIssue: string | undefined;
   let rejectedReferences = 0;
   const strict = strictFromEnv(ctx.config.strictOutbound);
@@ -129,6 +131,7 @@ export async function refinePrompt(ctx: Ctx, project: Project, graph: Graph, inp
 
     if (options.dryRun) {
       payload = prepareOutbound(SYSTEM_PROMPT, message, { strict });
+      dryRunRedactions = request.count + payload.redactions;
       mode = 'dry-run';
     } else {
       try {
@@ -181,6 +184,7 @@ export async function refinePrompt(ctx: Ctx, project: Project, graph: Graph, inp
     provider,
     redactions,
     reused: reuse.length,
+    dryRunRedactions,
     noConfidentMatch,
     criteria: criteria.length,
     baselineTokens,

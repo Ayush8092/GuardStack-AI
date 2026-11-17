@@ -51,14 +51,37 @@ const blockScalar = new RegExp(String.raw`(^[ \t]*(?:-[ \t]+)?${NAME}[ \t]*:[ \t
 const envLine = new RegExp(String.raw`^(\s*(?:export\s+)?${NAME}\s*=\s*)(\S.*)$`, 'gim');
 const yamlLine = new RegExp(String.raw`^([ \t]*(?:-[ \t]+)?${NAME}[ \t]*:[ \t]+)([^\s"'\[{|>#][^\n]*)$`, 'gim');
 
+const inlineAssignment = new RegExp(
+  String.raw`(\b${NAME}["']?\s*[:=]\s*)([^\s"'\x60,;)\]}]{8,})`,
+  'gi',
+);
+
 const harmlessValue = /^(?:process\.env|os\.environ|os\.getenv|import\.meta|getenv|env\.|\$\{|\$[A-Z_]+|<|\[REDACTED|your[_-]|xxx|changeme|example|placeholder)/i;
 const sensitiveEnvName = /(?:key|token|secret|passw)/i;
 
-// An unquoted `token: string;` is a type annotation, `password: hunter2pass99` is a secret: require a digit or symbol.
+// Existing helper: keep YAML secret detection behavior unchanged.
 const looksLikeSecretValue = (value: string): boolean => {
   const trimmed = value.trim().replace(/[,;]+$/, '');
-  return trimmed.length >= 10 && /[0-9_\-+/=@!#$%^&*]/.test(trimmed) && !/\s/.test(trimmed) && !harmlessValue.test(trimmed);
+  return (
+    trimmed.length >= 10 &&
+    /[0-9_\-+/=@!#$%^&*]/.test(trimmed) &&
+    !/\s/.test(trimmed) &&
+    !harmlessValue.test(trimmed)
+  );
 };
+
+// New helper: inline assignments also recognize long alphabetic passphrases.
+const looksLikeInlineSecret = (value: string): boolean => {
+  const candidate = value.replace(/[.!?]+$/, '');
+
+  return (
+    candidate.length >= 8 &&
+    !harmlessValue.test(candidate) &&
+    !/\s/.test(candidate) &&
+    (/[0-9_\-+/=@!#$%^&*]/.test(candidate) || /^[A-Za-z]{16,}$/.test(candidate))
+  );
+};
+
 
 type Custom = { regexes: [label: string, pattern: RegExp][]; literals: string[] };
 let custom: Custom = { regexes: [], literals: [] };
@@ -257,6 +280,16 @@ export function maskSecrets(input: string): { text: string; count: number } {
     if (!looksLikeSecretValue(value)) return whole;
     count++;
     return `${head}[REDACTED:secret]`;
+  });
+
+  text = text.replace(inlineAssignment, (whole, head: string, value: string) => {
+    const punctuation = value.match(/[.!?]+$/)?.[0] ?? '';
+    const candidate = value.slice(0, value.length - punctuation.length);
+
+    if (!looksLikeInlineSecret(candidate)) return whole;
+
+    count++;
+    return `${head}[REDACTED:secret]${punctuation}`;
   });
 
   return { text, count };

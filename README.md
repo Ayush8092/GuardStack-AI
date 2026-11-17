@@ -320,6 +320,7 @@ To inspect the exact masked payload without making an external request, use:
 
 ```bash
 guardian optimize "Add request validation to the API" --dry-run
+```
 
 Use `--no-llm` when you want to explicitly keep an optimization operation local.
 
@@ -426,7 +427,57 @@ When both provider keys are configured, Gemini is attempted first and Groq is us
 
 The default per-provider timeout is 12 seconds. It can be configured with `GUARDIAN_LLM_TIMEOUT_MS`, within the supported range of 200 ms to 60 seconds.
 
-Keep API keys in a local environment file or your environment. Do not commit secrets to the repository.
+### Supplying provider API keys
+
+The recommended approach for MCP clients is to provide credentials through the MCP server's `env` configuration. Add the variables to the generated `codeguardian` server entry:
+
+```json
+{
+  "mcpServers": {
+    "codeguardian": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/code-guardian-ai/bin/cli.js",
+        "serve",
+        "--root",
+        "/absolute/path/to/your-project"
+      ],
+      "env": {
+        "GUARDIAN_LLM": "on",
+        "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY",
+        "GROQ_API_KEY": "YOUR_GROQ_API_KEY"
+      }
+    }
+  }
+}
+```
+
+Use the actual paths printed by `guardian init`. Include only the provider keys you intend to use. Keep real keys private and never commit them to your repository. The `env` block above is an example; `guardian init` does not insert real API keys for you.
+
+Alternatively, provide credentials through a private environment file:
+
+- Set `GUARDIAN_ENV_FILE` to the absolute path of that file.
+- If `GUARDIAN_ENV_FILE` is unset, GuardStack AI looks for `.env` in its package installation directory.
+- It does not automatically load `.env` from the workspace being analysed.
+
+The file can contain entries such as:
+
+```dotenv
+GEMINI_API_KEY=your_gemini_key
+GROQ_API_KEY=your_groq_key
+GUARDIAN_LLM=on
+```
+
+On Unix-like systems, restrict file permissions with `chmod 600 /path/to/private.env`. On Windows, use file permissions to restrict access to your user account. Do not paste real credentials into issues, logs, screenshots, or source control.
+
+External requests are made only when all of the following are true:
+
+1. `GUARDIAN_LLM` is explicitly set to `on`, `true`, `1`, or `yes`.
+2. `.guardianrc` enables the optional LLM step with `"llm": true`.
+3. At least one supported provider key is available.
+4. The operation has not explicitly disabled the LLM step with `--no-llm`.
+
+Having an API key configured does not enable external processing by itself. If any required condition is missing, GuardStack AI stays in local mode.
 
 ---
 

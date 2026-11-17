@@ -86,6 +86,17 @@ test('prepareOutbound masks both halves and counts the redactions', () => {
   assert.equal(out.redactions, 3);
 });
 
+test('prepareOutbound masks unquoted inline assignments in both halves', () => {
+  const out = prepareOutbound(
+    'system instructions password=systemsecret123',
+    'use apiKey=promptsecret123 for authentication',
+  );
+
+  assert.ok(!out.system.includes('systemsecret123'));
+  assert.ok(!out.prompt.includes('promptsecret123'));
+  assert.equal(out.redactions, 2);
+});
+
 test('fully local mode makes no network request, and external mode needs an explicit opt-in', async () => {
   const ctx = context(workspace(project));
   const indexed = await indexProject(ctx);
@@ -125,6 +136,27 @@ test('dry run shows the masked payload and sends nothing', async () => {
   assert.ok(!refined.payload.prompt.includes(AWS) && !refined.payload.prompt.includes(SK));
   assert.match(refined.payload.prompt, /<request>/);
   assert.match(refined.payload.prompt, /<layout>/);
+});
+
+test('dry-run redaction count includes secrets masked from the original request', async () => {
+  const root = workspace({ 'src/main.ts': 'export const main = 1;\n' });
+  const ctx = context(root);
+  const indexed = await indexProject(ctx);
+  const { graph } = analyzeProject(indexed, ctx.config);
+
+  const refined = await refinePrompt(
+    ctx,
+    indexed,
+    graph,
+    'Explain this code and protect password=originalsecret123',
+    { mode: 'external', reason: 'enabled' },
+    { dryRun: true },
+  );
+
+  assert.ok(refined.payload);
+  assert.ok(!refined.payload.prompt.includes('originalsecret123'));
+  assert.equal(refined.payload.redactions, 0);
+  assert.equal(refined.dryRunRedactions, 1);
 });
 
 test('log output is masked', () => {

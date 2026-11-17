@@ -35,7 +35,7 @@ export async function optimize(promptArg: string | undefined, opts: { root?: str
     if (opts.dryRun) {
       if (refined.payload) {
         out('--- system ---\n' + refined.payload.system + '\n--- message (secrets already masked) ---\n' + refined.payload.prompt);
-        err(`\n${refined.payload.redactions} secret(s) were redacted from this payload.`);
+        err(`\n${refined.dryRunRedactions} secret(s) were redacted from this payload.`);
       } else {
         out('Nothing would be sent: fully local mode.');
       }

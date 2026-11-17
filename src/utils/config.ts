@@ -124,7 +124,3 @@ export function loadConfig(root: string): Config {
   const data = readOptionalInside(root, configFileName, MAX_CONFIG_BYTES, { rejectHardLinks: true });
   return data === null ? parseConfig({}) : parseConfigText(data.toString('utf8'));
 }
-
-export function llmEnabled(config: Config): boolean {
-  return config.llm && process.env.GUARDIAN_LLM?.toLowerCase() !== 'off';
-}

@@ -1,83 +1,341 @@
-# CodeGuardian AI
+# GuardStack AI
 
-A local MCP server and CLI that tells your AI coding assistant what already exists in your codebase, so it reuses code instead of duplicating it, and then checks what the assistant changed. It parses the project with tree-sitter, caches results in SQLite, and hands the assistant a compact, secret-free map before it writes anything.
+GuardStack AI is a local MCP server and CLI for helping AI coding assistants work with an existing codebase.
 
-## Setup
+It provides tools to find reusable code, retrieve relevant project context, prepare coding prompts, and check changes for issues such as duplicate implementations, circular dependencies, and unused code.
 
-Requires Node 22 or newer.
+Analysis runs locally. An optional LLM step can be enabled for prompt clarification, with outbound data restricted and masked before it is sent.
+
+**Package:** `code-guardian-ai`
+**CLI:** `guardian`
+**Runtime:** Node.js 22 or later
+**License:** MIT
+
+---
+
+## What it does
+
+AI coding assistants often work with incomplete knowledge of a project. They may recreate utilities that already exist, introduce another implementation of an existing feature, or make changes that weaken the project's existing checks.
+
+GuardStack AI gives an assistant access to structured information about the codebase and a way to validate changes against it.
+
+| Capability | Description |
+|---|---|
+| Reusable code search | Find existing functions and classes relevant to a task |
+| Codebase context | Retrieve a compact map of files, exports, functions, classes, and types |
+| Prompt optimization | Add relevant project context and reuse constraints to a coding request |
+| Change validation | Identify newly introduced code-quality findings |
+| Local analysis | Parse and analyze supported source files without sending their contents to an external model |
+
+GuardStack AI supports TypeScript, JavaScript, and Python analysis.
+
+It is designed to work through MCP. The assistant decides when to call its tools; GuardStack AI does not intercept prompts or independently control the assistant's actions.
+
+## Requirements
+
+- Node.js 22 or later
+- Git, for change validation against a base revision
+- An MCP-compatible coding assistant, if using the MCP server
+
+The CLI can be used independently of an MCP client.
+
+## Installation
+
+After the package is published to npm:
 
 ```bash
-npm ci --ignore-scripts
-npm run build
-node bin/cli.js doctor      # verifies better-sqlite3, the parsers and git on this machine
+npm install -g code-guardian-ai
 ```
 
-To use it as a command (`guardian`) without publishing, build a tarball and install it: `npm run build && npm pack`, then `npm install -g ./code-guardian-ai-0.3.0.tgz`. `npm run pack:smoke` does exactly this in a throwaway directory and runs the CLI from both a local and a global install. It has been run on Linux; the CI matrix runs it on Ubuntu, macOS and Windows, and that is the check to trust for those platforms.
-
-A `package-lock.json` is committed. `better-sqlite3` 13 ships prebuilt binaries for macOS, Linux (glibc and musl) and Windows on x64 and arm64 inside the package itself, so `npm ci --ignore-scripts` needs no compiler and runs no install scripts. CI installs this way on Ubuntu, macOS and Windows with Node 22 and 24 (`.github/workflows/ci.yml`). If `doctor` reports a failure on your platform, please open an issue with its output.
-
-Copy `.env.example` to `.env` only if you want the optional external LLM step (see [Security model](#security-model)). Then, inside the project you want to protect:
+Check the installation:
 
 ```bash
-node /path/to/code-guardian-ai/bin/cli.js init
+guardian --version
+guardian doctor
 ```
 
-`init` creates `.guardianrc`, adds `.guardian/` to `.gitignore`, shows the privacy mode, and prints ready-to-paste config for Claude Code, Claude Desktop and Cursor.
+`guardian doctor` checks the local runtime, native modules, parsers, and Git availability.
 
-## Commands
+## Quick start
 
-| Command | What it does |
-| --- | --- |
-| `guardian init` | Prepares the workspace and prints MCP client config |
-| `guardian serve` | Starts the MCP server on stdio (your AI client runs this) |
-| `guardian doctor` | Checks native modules, parsers, git and the privacy mode |
-| `guardian scan` | Duplicates, circular dependencies, unused imports, unresolved imports, orphan files, unused exports, suppressed checks |
-| `guardian scan --json` | Full report including the import graph, cycles and imports the resolver could not judge |
-| `guardian scan --explain` | Adds the evidence and a recommended action under each finding |
-| `guardian check` | Only the problems introduced by your uncommitted git changes. `--base main` compares against a branch, `--all` also lists pre-existing ones, `--fail-on medium` exits 1 for CI, `--fail-on-partial` exits 1 when the comparison is only partial, `--config-policy fail` exits 1 when the change weakens the analysis configuration |
-| `guardian optimize "prompt"` | Adds codebase context to a prompt. `--no-llm` forces local, `--dry-run` prints the exact external payload without sending |
+Run the following commands from the root of the project you want to analyze.
 
-Use `--root <dir>` on any command to point at another project.
+### 1. Initialize the workspace
 
-**Exit codes** (the same on every platform): `0` success, `1` the check failed a condition you asked for, `2` usage or runtime error (`doctor` also exits 1 when a check fails). `guardian check` exits 1 only for the conditions you enable, and prints each reason on stderr (and in `failures` with `--json`): `--fail-on <severity>` (a new finding at least that severe), `--fail-on-partial` (the validation is partial) and `--config-policy fail` (the change weakens the analysis configuration). Without them it exits 0 whatever it reports, so an interactive run can still read a partial report. **In CI, use `--fail-on-partial`**: a partial validation that finds nothing is "nothing found in the part that could be compared", not a pass. The text output ends with `Validation: COMPLETE` or `Validation: PARTIAL`; with `--json`, `partial` and `partialReasons` say the same.
+```bash
+guardian init
+```
+
+This prepares the workspace for GuardStack AI:
+
+- Creates `.guardianrc` if it does not already exist.
+- Prepares the local `.guardian/` cache directory.
+- Adds `.guardian/` to `.gitignore` when needed.
+- Displays the active privacy policy.
+- Prints MCP configuration examples for supported clients.
+- Prints an instruction that can be added to your assistant's project instructions.
+
+Existing `.guardianrc` files are preserved rather than overwritten.
+
+### 2. Inspect the codebase
+
+```bash
+guardian scan
+```
+
+The scan reports findings such as duplicate implementations, circular dependencies, unused imports, orphan files, and dead exports.
+
+For structured output:
+
+```bash
+guardian scan --json
+```
+
+For evidence and suggested actions:
+
+```bash
+guardian scan --explain
+```
+
+### 3. Search for existing code
+
+```bash
+guardian find "authentication middleware"
+```
+
+This performs local retrieval over indexed code. It does not require an external LLM.
+
+### 4. Check your changes
+
+```bash
+guardian check
+```
+
+In a Git repository, this compares findings against the selected base revision and reports newly introduced issues by default.
+
+---
+
+## Connect an MCP client
+
+GuardStack AI exposes its functionality through an MCP server using standard input and output (stdio).
+
+Initialize the workspace first:
+
+```bash
+guardian init
+```
+
+Use the MCP configuration printed by the command for your client. The generated configuration contains the resolved CLI path and workspace root.
+
+The server configuration has this general form:
+
+```json
+{
+  "mcpServers": {
+    "codeguardian": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/code-guardian-ai/bin/cli.js",
+        "serve",
+        "--root",
+        "/absolute/path/to/your-project"
+      ]
+    }
+  }
+}
+```
+
+Use the actual paths printed by `guardian init`; the paths above are illustrative.
+
+### Claude Code
+
+`guardian init` prints a Claude Code registration command. Run the generated command from your terminal.
+
+### Claude Desktop and Cursor
+
+Add the generated `mcpServers` entry to the MCP configuration used by your client.
+
+Restart or reload the client after changing its MCP configuration.
+
+### Add project instructions
+
+MCP tools are called at the assistant's discretion. To make their intended use clearer, add the instruction printed by `guardian init` to your project's `CLAUDE.md` or `.cursorrules` file.
+
+The instruction asks the assistant to:
+
+1. Search for reusable code before writing new helpers.
+2. Use the existing implementations where appropriate.
+3. Validate its changes after implementation.
+
+These instructions guide the assistant; they are not an enforcement mechanism.
+
+---
+
+## CLI reference
+
+Run `guardian --help` or `guardian <command> --help` for command-specific options.
+
+| Command | Purpose |
+|---|---|
+| `guardian init` | Initialize a workspace and print MCP configuration |
+| `guardian serve` | Start the MCP server over stdio |
+| `guardian doctor` | Check runtime dependencies and local setup |
+| `guardian scan` | Analyze the workspace |
+| `guardian scan --json` | Print the scan report as JSON |
+| `guardian scan --explain` | Include evidence and recommended actions |
+| `guardian check` | Validate changes against a Git base revision |
+| `guardian find <query>` | Search locally for reusable code |
+| `guardian optimize [prompt]` | Add relevant codebase context to a coding request |
+
+### Workspace selection
+
+All commands accept:
+
+```bash
+--root <dir>
+```
+
+This selects the workspace to operate on. If omitted, the current directory is used, unless overridden by the configured workspace environment.
+
+### `guardian check` options
+
+| Option | Description |
+|---|---|
+| `--base <ref>` | Compare against a Git reference instead of `HEAD` |
+| `--all` | Include pre-existing findings |
+| `--json` | Print structured JSON output |
+| `--fail-on <severity>` | Exit with code 1 when a new finding reaches the selected severity (`high`, `medium`, or `low`) |
+| `--fail-on-partial` | Exit with code 1 when validation is partial |
+| `--config-policy <policy>` | Choose how weakened analysis configuration is handled: `warn`, `fail`, or `approve` |
+
+By default, `check` focuses on newly introduced findings. In a Git repository, it considers staged, unstaged, and untracked changes.
+
+### `guardian find` options
+
+| Option | Description |
+|---|---|
+| `--json` | Print structured results |
+| `--limit <n>` | Maximum number of candidates to return (1–50; default 8) |
+
+### `guardian optimize` options
+
+| Option | Description |
+|---|---|
+| `--no-llm` | Disable the optional external LLM step |
+| `--dry-run` | Print the exact masked payload that would be sent, without sending it |
+
+If no prompt is supplied, `guardian optimize` reads the request from standard input.
+
+---
 
 ## MCP tools
 
-- `find_reusable_code`: local, read-only lookup of existing functions and classes that match what the assistant is about to write, with the reason for each match. Says plainly when nothing matches.
-- `get_codebase_context`: compact map of exported symbols, ranked for your query, within a token budget.
-- `optimize_prompt`: keeps your request verbatim and adds the acceptance criteria it found, the existing code to reuse, related modules and constraints.
-- `validate_rules`: git-aware. Reports only what your changes introduced, counts pre-existing findings without listing them, and notes what you fixed.
+The MCP server exposes four tools.
 
-MCP is pull-based: the assistant decides whether to call a tool, and nothing here intercepts a prompt before the assistant sees it. The server sends instructions telling it to call `find_reusable_code` first, but for reliable use add the line printed by `guardian init` to `CLAUDE.md` or `.cursorrules`.
+### `find_reusable_code`
 
-## How analysis works
+Searches the indexed codebase for existing functions and classes relevant to a request.
 
-**Indexing.** Every eligible file is discovered, sorted by path, then limited to `maxFiles`, so which files are indexed is deterministic. A file's SHA-256 content hash is the only cache validity check; size and mtime are never trusted. Hitting `maxFiles` never evicts cache entries for files left out of that pass. Every report says whether analysis is complete or partial and why. Findings that need a view of every file (orphans, unused exports) are low confidence on a partial scan.
+Inputs:
 
-**Extraction.** TypeScript, JavaScript (JSX, ESM and CommonJS) and Python: destructured declarations, `export *`, named and aliased re-exports, `import x = require()`, `module.exports`, `require()` with destructuring, namespace member tracking, dynamic `import()`/`require()`/`import.meta.glob` (including computed paths), and decorated classes. Unused imports are scope-aware: a parameter, local or catch variable with the same name neither hides an unused import nor counts as a use of it.
+- `query`: search text or identifiers.
+- `limit`: optional result limit, defaulting to 8.
 
-**Resolution.** Relative imports (including `.js` to `.ts` and trailing-slash directories), index files and barrels; `tsconfig`/`jsconfig` `paths`, `baseUrl`, `extends` (relative and from packages), `include`/`exclude`, `references`; workspace packages through `exports`, `main`, `module` and `types`, mapped back to source through `outDir`/`rootDir`; `package.json` `imports` (`#alias`); SvelteKit (`$lib`) and Nuxt (`~`, `@`) aliases when their dependency is present; Python packages with relative imports and configurable roots. Two equally valid targets are reported as ambiguous, not guessed. Anything the resolver cannot model (a Vite or webpack alias, a built package whose source it cannot find, a relative import into a missing `dist/`) is reported as **unsupported** and is never counted as a broken import.
+The search is local and does not call an LLM. If no useful match is found, the tool reports that rather than inventing an implementation.
 
-**Duplicates.** Two separate rules, each saying what it compared. `duplicate-body`: the bodies are identical once whitespace is ignored (high confidence). `similar-structure`: the syntax trees match after local names are renumbered and literals and type annotations are ignored, with at least 40 tokens (medium confidence). Called function names and property names are not ignored. Neither rule compares behaviour. A shared name alone is a low-confidence `duplicate-symbol`.
+### `get_codebase_context`
 
-**Unused code.** A file or export nobody imports is classified. `confidently-unused`: the scan is complete and nothing points at it. `potentially-unused`: something could still reach it, such as a dynamic import or glob whose path covers it, a framework or plugin directory, a decorated class, a file that runs code when loaded, an import through an alias the resolver cannot follow, or unanalysed `.vue`/`.svelte`/`.astro`/`.mdx` files. `unreferenced`: the scan was partial, so nothing more can be said. Entry points come from conventions, the detected framework profile, public package exports (`exports`, `main`, `bin`) and your `entryPoints`.
+Returns a compact representation of relevant project structure and symbols.
 
-**Cycles.** Strongly connected components over runtime imports, including a file that imports itself. Type-only imports, `import()` and function-scoped or `TYPE_CHECKING` Python imports do not count.
+It can accept:
 
-**Retrieval.** Query understanding (identifiers, path hints, stems, a small synonym table), IDF-weighted matching over each symbol's name, doc comment or docstring, and signature, with a bonus for covering more of the request's terms, then dependency, importer and sibling expansion. A symbol is a candidate when its name, signature or description matched; a match through the file path alone only makes the file "related", so a path match never lists every function in it. Output states one of four things: strong matches, weak matches ("No confident match" plus the weak candidates), related files only, or no match. Candidates that matched but did not fit under `--limit` are counted. Each candidate carries the reasons it matched; popularity only orders files that already matched. Descriptions are used locally and are never sent to an external model.
+- A natural-language query.
+- A list of workspace-relative paths.
+- A maximum token budget.
 
-**Validation.** `validate_rules` and `guardian check` read the git diff (staged, unstaged and untracked, against `HEAD` or `--base`), rebuild the project as it was at the base commit (its files, tsconfig, `.gitignore`, `.guardianrc` and manifests, not today's), run the same analysis on both, and compare findings by identity. The base manifests are compared on what resolution reads (names, entry fields, `exports`, `imports`, detected frameworks), so a `package.json` edit alone is validated. A renamed file comes back at its original path and its findings follow it to the new one. Editing a config file counts as a change to everything it affects. If the comparison cannot be complete (more than 400 changed source files, a base file that cannot be read back, or a base `.guardianrc`, `.gitignore`, tsconfig or `package.json` that exists but cannot be read or parsed) the report says `PARTIAL VALIDATION`, lists what was not compared, and labels results provisional.
+The result prioritizes relevant files and symbols, and reports truncation, omitted files, dropped exports, token usage, and indexing notes.
 
-**Configuration downgrades.** The base commit's configuration is compared with the working tree's. A change that turns a rule off, lowers a rule's severity, adds `ignore` patterns, `exceptions` or `entryPoints`, or stops analysing files that were analysed at the base (through `.gitignore` or `ignore`) is reported as `CONFIGURATION WEAKENED`. Findings that disappear only because of that are listed as `suppressedByPolicy` (and in the report) and are **not** counted as fixed; deleting or renaming a file is a code change, not an exclusion. `--config-policy` decides the exit code: `warn` (default) reports only, `fail` exits 1, `approve` records that the caller accepted the weakening (still reported). The policy is an option of whoever runs the command, never read from the repository being checked, because a pull request could otherwise approve itself. A scan that stopped early cannot tell which files were excluded, so that one signal is skipped then (the validation is partial anyway).
+It is a structural context summary, not a full dump of source files.
 
-**Resource budgets.** Every file's syntax tree is measured before extraction with an explicit stack (no recursion). A file nested deeper than 1,000 levels or larger than 750,000 nodes is not analysed: it is returned as `degraded` with nothing extracted, counted as partial, and named in the coverage note; it is never reported as clean. The visitors that walk trees are iterative, so a pathological file cannot exhaust the call stack. These budgets bound memory and call-stack use, not time: a time limit still cannot interrupt one synchronous parse (see "Resource limits").
+### `optimize_prompt`
 
-**Token figures** are estimates (about four bytes per token). The comparison is always against reading the files that actually appear in the output in full. Truncation is reported, and budgets apply to new workspaces too.
+Adds relevant codebase context to a coding request.
 
+It can provide:
+
+- Existing functions and modules to reuse.
+- Constraints against unnecessary duplication and code bloat.
+- Acceptance criteria identified in the request.
+- Relevant project structure.
+
+The original request is retained. Depending on the active privacy policy, an optional external LLM may be used to clarify the request.
+
+### `validate_rules`
+
+Checks code for selected issues, including:
+
+- Duplicate functions.
+- Circular dependencies.
+- Unused imports.
+- Orphan files.
+- Unused exports.
+- Suppressed type and lint checks, including patterns such as `@ts-ignore`, `eslint-disable`, `any`, `# noqa`, and `# type: ignore`.
+
+In a Git repository, it compares against a base revision and focuses on newly introduced findings unless existing findings are explicitly requested.
+
+Outside a Git repository, validation applies to the workspace as a whole.
+
+---
+
+## Privacy and data handling
+
+GuardStack AI runs locally by default.
+
+Indexing, parsing, retrieval, caching, and static analysis do not require an external LLM provider.
+
+### Local mode
+
+Local mode is the default. When the optional LLM step is disabled, GuardStack AI does not send project data to Gemini or Groq.
+
+### Optional external LLM mode
+
+The external step is used only when all of the following conditions are met:
+
+1. `GUARDIAN_LLM` is explicitly enabled.
+2. `.guardianrc` allows the LLM step with `"llm": true`.
+3. At least one supported provider API key is configured.
+4. The operation has not explicitly disabled LLM use with `--no-llm`.
+
+The outbound payload is limited to:
+
+- The developer's request.
+- Up to eight matching symbol signatures and their file paths.
+- A folder summary.
+
+The payload passes through the configured secret-masking layer before transmission. Source file contents and function bodies are not included in this external payload.
+
+### Preview before sending
+
+To inspect the exact masked payload without making an external request, use:
+
+```bash
+guardian optimize "Add request validation to the API" --dry-run
+
+Use `--no-llm` when you want to explicitly keep an optimization operation local.
+
+### Important privacy limitation
+
+Secret masking reduces the risk of accidental disclosure; it cannot guarantee detection of every possible secret or sensitive value.
+
+Review the preview before enabling external processing in a sensitive workspace.
+
+---
 
 ## Configuration
 
-`.guardianrc` in the project root, read through the same sandbox as every other file (a symlink out of the workspace is refused). Every field is optional and the file is schema-validated; unknown keys are an error.
+Workspace configuration is stored in `.guardianrc`.
+
+A configuration can look like this:
 
 ```json
 {
@@ -91,135 +349,376 @@ MCP is pull-based: the assistant decides whether to call a tool, and nothing her
   "llm": true,
   "pythonRoots": ["", "src"],
   "profile": "auto",
-  "entryPoints": ["tools/seed.ts", "src/plugins/**"],
-  "rules": { "similar-structure": "low", "unused-import": "off" },
-  "exceptions": [{ "rule": "dead-export", "path": "src/api/**", "symbol": "handler" }],
+  "entryPoints": [
+    "tools/seed.ts",
+    "src/plugins/**"
+  ],
+  "rules": {
+    "similar-structure": "low",
+    "unused-import": "off"
+  },
+  "exceptions": [
+    {
+      "rule": "dead-export",
+      "path": "src/api/**",
+      "symbol": "handler"
+    }
+  ],
   "strictOutbound": false,
-  "maskPatterns": [{ "name": "ticket", "pattern": "TKT-\\d{6}" }],
-  "maskLiterals": ["internal-host-7"]
+  "maskPatterns": [
+    {
+      "name": "ticket",
+      "pattern": "TKT-\\d{6}"
+    }
+  ],
+  "maskLiterals": [
+    "internal-host-7"
+  ]
 }
 ```
 
-- `maxDiscoveryEntries`, `maxDiscoveryMemoryMb`, `maxDiscoveryMs`, `maxIndexMs`: resource limits for indexing; see "Resource limits" below for exactly what each one bounds. A scan that hits a limit is reported as `PARTIAL` (`stopped` in `--json` output), never as complete, and findings that need every file are low confidence. Files already parsed stay cached, so running the scan again continues where it stopped.
-- `profile`: `auto` (detect from `package.json` dependencies), `none` (trust only `entryPoints`), or `next`, `nuxt`, `sveltekit`, `vite`, `astro`, `node`, `library`. A profile only says which files a framework loads by convention.
-- `entryPoints`: gitignore-style patterns for files loaded by something other than an import.
-- `rules`: per-rule severity (`high`, `medium`, `low`) or `off`. Rules: `duplicate-body`, `similar-structure`, `duplicate-symbol`, `circular-dependency`, `unused-import`, `unresolved-import`, `dead-export`, `orphan-file`, `suppression`.
-- `exceptions`: findings of a rule in matching files (optionally mentioning a symbol) are not reported.
-- `maskPatterns` are extra regular expressions to redact. Because a repository controls this file, patterns with nested quantifiers, back-references, look-around or empty matches are rejected.
+### Configuration options
 
-`.gitignore` is respected. Environment variables: `GUARDIAN_LLM`, `GUARDIAN_STRICT`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `GEMINI_MODEL`, `GROQ_MODEL`, `GUARDIAN_LLM_TIMEOUT_MS` (default 12000), `GUARDIAN_LOG`, `GUARDIAN_ROOT`, `GUARDIAN_ENV_FILE`. Keys set by your MCP client in its `env` block take precedence over `.env`.
+| Option | Purpose |
+|---|---|
+| `ignore` | Paths to exclude from analysis |
+| `maxFiles` | Maximum number of files to index |
+| `maxFileKb` | Maximum file size considered for indexing |
+| `maxDiscoveryEntries` | Maximum filesystem entries considered during discovery |
+| `maxDiscoveryMs` | Time budget for file discovery |
+| `maxIndexMs` | Time budget for indexing |
+| `contextTokens` | Default token budget for retrieved context |
+| `llm` | Allows or disables the optional external LLM step |
+| `pythonRoots` | Additional Python import roots |
+| `profile` | Analysis profile; `auto` selects automatically |
+| `entryPoints` | Paths or patterns used as entry points |
+| `rules` | Per-rule severity overrides |
+| `exceptions` | Targeted exceptions for selected findings |
+| `strictOutbound` | Blocks outbound payloads containing content the secret masker cannot verify |
+| `maskPatterns` | Additional regular expressions used to mask sensitive values |
+| `maskLiterals` | Literal values to mask in outbound text |
 
-### Resource limits
+Configuration changes can affect analysis coverage and confidence. In particular, disabling rules or excluding paths can hide findings.
 
-Discovery distinguishes three numbers, and `maxDiscoveryEntries` bounds only one of them:
+### Environment variables
 
-| Quantity | Meaning | Bounded by |
-| --- | --- | --- |
-| entries **read** (`listed`) | directory entries read from the file system | the time limit `maxDiscoveryMs` (not the entry limit) |
-| entries **processed** (`entries`) | entries classified, ignore-checked and stat-ed, in sorted order. The entry that would exceed the limit is detected (that is how `entry-limit` is reported) but is neither processed nor counted, so `entries` never exceeds `maxDiscoveryEntries` | `maxDiscoveryEntries` |
-| **peak listing buffer** (`peakListingBuffer`) | the most entries the directory-listing buffer held at one moment, counted in entries, not bytes. It covers **only that buffer**. It is not total discovery memory: the retained candidates (`eligible`), the directories still to visit and the result lists are not part of it | about `1.5 × (maxDiscoveryEntries − entries so far) + 8192` per directory, usually much less |
+| Variable | Purpose |
+|---|---|
+| `GUARDIAN_LLM` | Enables the optional external LLM step when explicitly set to an accepted enabled value |
+| `GUARDIAN_STRICT` | Overrides `strictOutbound`; `1`, `on`, `true`, and `yes` enable strict mode. Any other non-empty value disables it |
+| `GEMINI_API_KEY` | Gemini provider key |
+| `GROQ_API_KEY` | Groq provider key |
+| `GEMINI_MODEL` | Overrides the Gemini model |
+| `GROQ_MODEL` | Overrides the Groq model |
+| `GUARDIAN_LLM_TIMEOUT_MS` | Per-provider timeout in milliseconds |
+| `GUARDIAN_LOG` | Log level: `debug`, `info`, `warn`, or `error` |
+| `GUARDIAN_ROOT` | Workspace root override |
+| `GUARDIAN_ENV_FILE` | Explicit environment-file path |
 
-- **Why the whole directory is read.** Discovery is deterministic: when a limit applies, the entries kept are the first ones in name order, whatever order the operating system lists them. Knowing which names come first requires reading the entire directory. A directory of a million files with `maxDiscoveryEntries: 500` is therefore still read completely (and the scan reports `entry-limit`); only 500 entries are processed and only a bounded number are held in memory. The listing is streamed in batches, yields to the event loop, and is cut off by `maxDiscoveryMs`. Choosing not to read everything would make the selected files depend on file-system order, so it was not done.
-- **Memory.** A listed entry is kept as its name and kind only, entries that sort after the current cutoff are dropped on arrival, and the buffer is cut back as it grows. An entry count says nothing about bytes (255-character names cost about ten times what short names do), so discovery also keeps a deterministic estimate of what it holds (name bytes, listing buffers, an allowance for sorting and merging, directories still to visit, `eligible` and the other result lists) and stops when it would pass `maxDiscoveryMemoryMb` (default 128, trusted ceiling 256; the trusted ceiling of `maxDiscoveryEntries` is 1,000,000). The scan is then `PARTIAL` with the reason `memory-limit`; a directory that could not be selected from within the budget contributes nothing, and nothing is dropped silently. The estimate is computed from names and counts, not measured from the heap; a test checks that it is not lower than the real heap for the data structures it covers. Final sorts of the result lists are single synchronous sorts and cannot be interrupted.
-- **Entries of unknown type.** Some file systems and network mounts report no type for a directory entry. Such an entry is classified with `lstat`, which never follows a symbolic link: an unknown file is indexed, an unknown directory is entered, a link is skipped, and a socket or device is ignored. The size check of a candidate file also uses `lstat`, so a file swapped for a link after it was listed is not followed. Failures are never dropped silently. If `lstat` fails with a permission or I/O error, or an entry listed as a file is no longer a file when examined (replaced by a link or a directory), the entry could be a source file the scan could not see, so it is reported as skipped with reason `unclassified` and the scan is `PARTIAL`. If the error is `ENOENT` the entry was removed during the scan: it is recorded as `vanished` and is not a gap.
-- **Directory races.** A directory that was listed can be replaced by a symbolic link before it is opened. Each directory is therefore checked and opened in layers: `lstat` must show a directory and not a link; on Linux and macOS the descriptor is opened with `O_NOFOLLOW | O_DIRECTORY` (the kernel refuses a link atomically) and `fstat` must show the same device and inode; on Linux the listing is read through `/proc/self/fd/<fd>`, from the verified directory itself, so a replacement that is undone changes nothing and the real path (`readlink`) must be inside the workspace; after the listing the path is checked again. A directory that fails any check is reported as skipped with reason `directory-replaced`, nothing from it is used, and the scan is `PARTIAL`. **Limits:** Node has no `openat` or `fdopendir`, so on macOS and Windows the listing is still opened by path and the checks before and after only bracket it: a replacement that happens and is undone inside that window cannot be detected there (Windows also has no `O_NOFOLLOW`; junctions and links are caught by `lstat` and the real-path check). File contents are never read through discovery's paths: `readInside` refuses links and paths outside the workspace by itself. The checks cost about 20 microseconds per directory (see the discovery benchmark).
-- **What `maxIndexMs` covers.** The time from the end of discovery (which has its own limit) until the last file has been handled: loading the grammars and the cache (neither can be interrupted, but their time counts against the budget), and for each file reading, hashing, the cache lookup and parsing. No further file is started once it has passed, and a file that was already read is not parsed after it. Not covered: discovery, the first file of every call, and the steps after the last file (writing the cache, loading tsconfig, package and pyproject files, building the result), which are bounded by the number of configuration files rather than of sources. Files that certainly need parsing (no cache row, or a row whose size or mtime differ; size and mtime only order the work, the SHA-256 still decides validity) are handled first, so a call stopped by the limit has spent its time on new work and repeated calls finish. The first file of a call is always handled. One consequence: if hashing the files that are already cached takes longer than `maxIndexMs`, a warm scan cannot finish in one call and is reported as `index-time-limit`; raise the limit. Interrupted indexing is always `PARTIAL`, never evicts cache rows, and `orphan-file`, `dead-export` and `unresolved-import` findings from it are low confidence.
-- **Hitting a limit is never silent.** `stopped` is `entry-limit`, `time-limit` or `index-time-limit`, `complete` is `false`, the cache is never pruned by a partial scan, and absence-based findings (`orphan-file`, `dead-export`) are not reported as confident.
-- **Time limits and cancellation are cooperative.** `maxDiscoveryMs`, `maxIndexMs` and an MCP client's cancellation are checked between units of work: between directory batches and sort slices, after every entry, between files, and between phases. They cannot interrupt a file system call or a Tree-sitter parse that is already running, so a limit can be exceeded by the time of one such call, for example the parse of the largest file you allow with `maxFileKb`. Nothing expensive is started after the deadline has passed or the request was cancelled, and a stopped or cancelled scan is reported as incomplete (a cancelled request throws instead of returning a result). Treat the time limits as best-effort, not as hard deadlines.
+The optional LLM step is disabled by default.
 
-### Known limits of the verification
+Default provider models:
 
-`test/mcp-transport.test.ts` exercises the real server through the SDK client over an in-memory transport. It does not exercise stdio framing, a separate server process, or several clients at once. `npm run bench:mcp` measures the tool workflows in-process and, with `--transport`, through that in-memory transport; neither is an end-to-end client latency.
+- Gemini: `gemini-3.1-flash-lite`
+- Groq: `openai/gpt-oss-120b`
+
+When both provider keys are configured, Gemini is attempted first and Groq is used as a fallback. If only one key is configured, only that provider is available.
+
+The default per-provider timeout is 12 seconds. It can be configured with `GUARDIAN_LLM_TIMEOUT_MS`, within the supported range of 200 ms to 60 seconds.
+
+Keep API keys in a local environment file or your environment. Do not commit secrets to the repository.
+
+---
+
+## How analysis works
+
+GuardStack AI uses deterministic indexing and static analysis rather than relying on an LLM to discover code-quality findings.
+
+### 1. File discovery and indexing
+
+The workspace is traversed in a deterministic, sorted order, subject to configured discovery and indexing limits.
+
+File content is hashed with SHA-256. The hash is used to determine whether cached analysis remains valid.
+
+Partial scans do not evict the entire existing cache. Resource limits are applied to prevent unexpectedly large workspaces from consuming unbounded time or memory.
+
+### 2. Parsing and symbol extraction
+
+Tree-sitter parsers are used to extract supported language structures.
+
+The current supported languages are:
+
+- TypeScript
+- JavaScript, including JSX, ESM, and CommonJS patterns
+- Python
+
+The index records relevant declarations, references, imports, exports, and relationships.
+
+Unused-import analysis includes scope-aware handling to avoid treating every textual occurrence as a valid reference.
+
+### 3. Import resolution
+
+Import resolution handles common project structures, including:
+
+- Relative imports.
+- TypeScript and JavaScript aliases.
+- `tsconfig` and `jsconfig` path mappings.
+- Workspace package exports.
+- Python import roots and relative imports.
+
+Unsupported or ambiguous resolution is reported as a limitation rather than automatically treated as a broken import.
+
+### 4. Duplicate detection
+
+Duplicate analysis uses more than one signal:
+
+- Duplicate symbol detection.
+- Duplicate function-body matching.
+- Similarity based on structural patterns.
+
+Similarity findings are evidence for review, not proof that two implementations are interchangeable.
+
+### 5. Unused-code analysis
+
+The analyzer looks for code that appears unused, including imports, exports, and files.
+
+Findings use different confidence levels because static analysis cannot always determine how a project is used at runtime.
+
+For example, a public API, dynamically loaded module, framework convention, or external entry point may be used without a direct reference visible to the analyzer.
+
+Configured entry points and exceptions can help account for these patterns.
+
+### 6. Dependency cycles
+
+Import relationships are used to identify circular dependencies.
+
+Resolution limitations can affect cycle detection, so unsupported import patterns are not silently treated as fully understood.
+
+### 7. Local retrieval
+
+Code retrieval uses lexical scoring with IDF-style weighting over indexed symbols and code metadata.
+
+It does not require embeddings or a hosted vector database.
+
+### 8. Change validation
+
+In a Git repository, validation reconstructs the selected base state and compares its findings with those in the current workspace.
+
+The comparison accounts for changed files and relevant configuration or manifest changes.
+
+By default, pre-existing findings are not reported as new issues. Use `--all` when you want to include them.
+
+Validation can be marked partial when the base state or changed-file coverage cannot be fully compared. Use `--fail-on-partial` in workflows where partial validation should fail the command.
+
+### 9. Configuration weakening
+
+Validation can identify changes that weaken analysis configuration.
+
+The `--config-policy` option controls how these changes are handled:
+
+- `warn`: report the change.
+- `fail`: fail validation.
+- `approve`: explicitly accept the configuration change.
+
+### 10. Resource and token budgets
+
+Discovery, indexing, file sizes, and retrieved context are bounded by configuration.
+
+Context retrieval reports token usage and indicates when content has been omitted or truncated. Token estimates are budgeting estimates, not guarantees of a provider's exact tokenizer count.
+
+---
 
 ## Security model
 
-There are two modes, and the tool always says which one produced a result.
+GuardStack AI is designed around local-first operation and explicit control over outbound processing.
 
-**Fully local mode (default).** Nothing leaves your machine. This is what you get unless every one of these is true: `GUARDIAN_LLM=on` is set, `.guardianrc` does not say `"llm": false`, `--no-llm` was not passed, and a Gemini or Groq key exists. `GUARDIAN_LLM=off`, or anything unrecognised, is local.
+### Workspace boundaries
 
-**External LLM mode (explicit opt-in).** `optimize_prompt` sends your request, the acceptance criteria found in it, up to 8 matching symbol signatures with file paths, and a folder summary (paths, names and signatures are written as escaped JSON strings and marked untrusted in the system prompt; comments, docstrings and bodies are never included) to Gemini (fallback Groq) for a short scope note. No file contents or function bodies are sent. The note is added to the prompt; it never replaces your request. `guardian optimize --dry-run` prints the exact masked payload and sends nothing.
+Workspace operations are restricted to the selected project root. File access and configuration writes use checks intended to prevent symlink-based escapes and unsafe file handling.
 
-Everywhere else:
+Sensitive files and unsupported file types are excluded from ordinary source indexing.
 
-- **One outbound choke point.** The complete payload (system text, XML context blocks, signatures, paths, folder metadata) is masked as a unit inside the provider layer immediately before transmission and then re-scanned. If anything still looks like a secret it is not sent.
-- **Masking everywhere.** Everything returned to an MCP client, printed by the CLI (text and JSON), or written to logs passes through the masker: provider API keys and tokens, JWTs, bearer and basic auth, private keys, credentials in URLs and query strings, assignments including multiline and concatenated values, YAML values and block scalars, `.env` lines, your configured `maskPatterns` and `maskLiterals`, and live values of your own key environment variables. Pattern-based masking can miss a secret in a format it does not know.
-- **Custom patterns are restricted, then bounded.** `maskPatterns` come from a file the repository controls, so a pattern is accepted only if it stays inside a safe subset: no repeated groups (so no nested quantifiers), no back-references or look-around, at most 4 quantifiers of which at most 2 unbounded, repeat counts up to 64, 5 groups, and it must not match an empty string. Even an accepted pattern runs over the whole text (never in pieces, so a secret cannot straddle a cut) in a time-limited context with the `m` flag: `^` and `$` anchor at every line, and `\s` or a negated class can match across a newline. If the 250 ms limit is hit, every non-empty line of that text is replaced by `[REDACTED:unscanned]` instead of being passed through, and any failure while masking an outbound payload blocks the send. A very slow but valid pattern therefore blanks output rather than hang the tool or leak. See `test/redos.test.ts`.
-- **Strict mode.** With `strictOutbound` or `GUARDIAN_STRICT=1`, a payload that still contains key-like high-entropy strings, encoded blobs, binary content or more text than the masker scans is refused instead of sent, and the reason is reported without echoing the content.
-- **Model output is untrusted.** The external reply must be one JSON object that matches a strict schema. Every file, symbol, path and identifier it mentions must exist in the index (or in your own request); anything else is dropped and reported. The note shown to you is built locally from the validated fields and has two labelled parts: references that were checked against the index, and the model's commentary, which only passed the checks below and is still opinion. Replies are also dropped item by item when they contain links, shell fragments, markup or instructions to the next model, or name a directory, file, symbol or identifier that does not exist in the project.
-- **Prompt injection: what is guaranteed, and what is not.** Repository text is untrusted data, and the design keeps it away from instructions:
-  - *Guaranteed by the code (tested).* The system prompt is a constant that contains no repository text. Everything derived from the workspace that goes to an external model (file and directory names, symbol names, signatures) is serialized as one JSON object per line with `<`, `>`, `&`, control characters, line separators, zero-width and bidirectional characters, variation selectors and the invisible Unicode tag block escaped, so a hostile name cannot close a section, open one, start a Markdown block, forge a field, or hide text from a reader. Comments, docstrings and function bodies are not sent. The text built locally for your own assistant (`optimize_prompt`, `get_codebase_context`, `find_reusable_code`) is Markdown, so it uses the same rules adapted to Markdown: every invisible or reordering character (one shared definition for all paths) is replaced, a `<` that could open a tag is written `&lt;` (generics such as `Promise<void>` are escaped too), text that starts a line cannot start a heading, quote, list or code fence, and line breaks cannot occur. Each of those outputs says that its entries are repository data, not instructions. The same scrub is applied to the model's reply.
-  - *Checked after the fact.* The reply must be one JSON object matching a strict schema; every file, symbol, path, directory and identifier it names is checked against the index and the item is dropped if it is not there; malformed output is discarded as a whole and the local result is used.
-  - *Not guaranteed.* Escaping protects the structure of the prompt, not the meaning of the words inside it. A signature or file name that reads like an instruction is still text a language model sees, and no encoding can promise a model will never be influenced by it. What limits the damage is what is sent (names, paths and signatures only), the trusted instructions that tell the model those strings are data, the strict reply schema, and local validation, which keeps a misled model from putting an invented file, a link, a command or hidden characters into your prompt. Treat the "Unverified commentary" section as the model's opinion. The prompt-injection risk is reduced and bounded, not eliminated. The local-only mode, which is the default, sends nothing.
-- **Workspace lock.** All file access goes through one sandbox: lexical and symlink-resolved checks, `O_NOFOLLOW`, `fstat` regular-file checks, size limits, and a check after opening that the file we hold is still the one the path names and still inside the workspace. Node has no atomic open-beneath, so a perfectly timed directory swap is narrowed, not made impossible. Windows device names and UNC forms are rejected. Tools accept only relative paths. Starting in `/` or your home directory is refused.
-- **Files never read.** `.env*`, private keys, `.npmrc`, anything named `*secret*` or `*credential*`, minified and generated files. Symlinks are never followed while scanning.
-- **Git is run safely.** Arguments are passed without a shell, refs are validated, `GIT_*` environment overrides are dropped, and repo-configured helpers (fsmonitor, external diff, textconv) are disabled.
-- **Bounded input and cost.** Tool inputs are schema-validated. A prompt over 8000 characters is rejected, not silently cut. LLM calls have a hard deadline, are capped at 20 per minute, and a provider that returns 429 is skipped until its cooldown ends.
-- **stdout is protocol-only.** Logs go to stderr.
+Git operations use controlled process execution rather than shell-interpolated commands.
 
-## Failure behaviour
+### Outbound data controls
 
-- **Bad files.** Syntax errors are parsed as far as possible. Unreadable, binary, oversized or unparseable files are skipped, listed in `scan --json`, and make the scan partial.
-- **Tool errors.** A failing tool returns `isError: true` with `{"error":{"code":"invalid_path"|"invalid_input"|"internal_error","message":"..."}}`. Internal details go only to the stderr log.
-- **Process level.** An unhandled rejection or uncaught exception is logged, running Git processes are ended, the cache is closed and the server exits with code 1, so it never keeps serving from an unknown state (the MCP client restarts it). A closed pipe, SIGINT or SIGTERM shuts it down cleanly with exit code 0. On Windows the Git process tree is ended with `taskkill /T /F` on shutdown and when a request is cancelled, and a tree is only reported as terminated when taskkill succeeded and the launcher is gone. If taskkill is missing, fails or times out, only the Git launcher is killed, processes it started may keep running, and that is logged (`Windows git cleanup degraded`) and never reported as a success. No Job Object is used: Node cannot create one without a native module or helper executable.
-- **Cache.** `.guardian/cache.db` uses WAL with a 5 s busy timeout, so several processes can share it. A corrupted database is rebuilt (only after the directory and file are re-verified, and never through a symlink or a replaced directory), corrupted rows are re-parsed, and a read-only, replaced or unusable folder falls back to an in-memory cache. Stored results are signed with a per-machine key kept outside the workspace, so a `cache.db` shipped in a repository cannot supply analysis results. A `.gitignore` that exists but cannot be applied makes the scan partial instead of being treated as empty.
-- **LLM step.** Timeouts, HTTP errors and malformed responses fall through to the next provider, then to the local result.
+External LLM requests pass through a central outbound-processing path.
 
-## Known limits
+The masking layer supports built-in detection and user-defined patterns and literals. Pattern execution is bounded. If masking fails, the outbound request is blocked rather than sending unprocessed text.
 
-Findings are candidates, not verdicts; read the confidence, method and evidence on each. Specifically:
+`strictOutbound` enables fail-closed outbound checks. In addition to secret masking and re-scanning, strict mode blocks payloads containing content the masker cannot verify, such as high-entropy key-like strings, encoded blobs, binary data, or text beyond its scanning limits. `GUARDIAN_STRICT` can override this setting through the environment.
 
-- Static analysis cannot see code outside the workspace, run-time registration it has no signal for, or importers in file types it does not read. Those cases lower confidence where a signal exists and are invisible where none does.
-- Structural similarity is a syntax comparison. It can match code that looks alike but is meant to differ, and miss code that does the same thing written differently.
-- Retrieval is lexical with a small synonym table, no embeddings: "add two numbers" does not find `sum`, and an abbreviation such as `len` for "length" is missed. It found 5 of 6 labelled fixture queries and 15 of 17 on real repositories.
-- A Python string used as a subscript index (`d["Name"]`) counts as a possible type reference, so an unused import of the same name is not reported.
-- Generated files (`*.gen.ts`, `*.generated.ts`, `__generated__/`) are not checked for unused imports.
-- Vite/webpack aliases, `tsconfig` `rootDirs`, and custom export conditions beyond what the resolver tries are reported as unsupported, not followed.
-- A Python `from . import sub` is treated as loading the submodule, not as a dependency on the package `__init__`, so cycles that exist only through a package's `__init__` are not reported. Python dead-export detection treats every public top-level name as an export. Python imports used through `getattr`, `globals()` or star imports are not seen.
-- Files that only import each other (an unreferenced cluster) are not reported as orphans: each has an importer.
-- Python entry points come from `pyproject.toml` console-script tables only (`setup.cfg` and `setup.py` entry points are not read, and a project that relies on them is reported as partial). The reader checks only what affects those tables; it is not a TOML parser.
-- Custom mask patterns are only accepted if they stay inside a restricted subset (no repeated groups, look-around or back-references, a few quantifiers). A very slow pattern blanks the text it cannot scan instead of passing it through.
-- Validation compares up to 400 changed source files; beyond that it says so and the result is provisional.
-- Supported languages: TypeScript, JavaScript and Python. The TypeScript Compiler API is deliberately not used; see `docs/decisions/0001-typescript-compiler-api.md`.
-- Tested end to end on Linux. Windows and macOS are covered by the CI matrix, not by any run behind this README.
+### Model output
 
-## Measured behaviour
+External model output is treated as untrusted input and validated before being used as an optimization result.
 
-From `npm run bench` and the checks below, on one Linux x64 machine (1 vCPU Xeon, Node 22). Timings are the median of 3 runs on a throwaway copy of each repository; memory is the operating system's peak resident set size for the whole process, which includes about 100 MB of baseline (Node, tree-sitter, SQLite). Treat the numbers as a guide: run-to-run spread on this machine was large (the cold index of 2000 files ranged from 0.7 to 1.5 s).
+The model does not receive unrestricted access to the workspace or the ability to execute project commands.
 
-| Repository | Source files | Cold index | Warm index | Analysis | Retrieval / query | Validate 25 changed files | Peak memory |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| synthetic | 2000 | 0.76 s | 0.10 s | 0.08 s | 37 ms | 0.29 s | 205 MB |
-| express | 142 | 0.60 s | 0.02 s | 0.01 s | 2 ms | 0.16 s | 150 MB |
-| got | 96 | 1.5 s | 0.01 s | 0.02 s | 15 ms | 0.45 s | 184 MB |
-| zod | 522 | 3.1 s | 0.06 s | 0.18 s | 47 ms | 0.78 s | 197 MB |
-| next-learn | 129 | 0.25 s | 0.02 s | 0.02 s | 9 ms | 0.26 s | 151 MB |
-| requests | 36 | 0.31 s | 0.01 s | 0.01 s | 3 ms | 0.28 s | 152 MB |
+### Prompt injection and limitations
 
-**Real repositories (express, got, zod, next-learn, create-t3-turbo, requests, click).** Running the analysis on them and checking results against the TypeScript compiler, pyflakes and the source found ten false positives that the fixtures had not, all fixed. What was checked automatically, what only by hand, and what was not checked at all is listed in [docs/evaluation.md](docs/evaluation.md). In short: unused imports (16 reported) and cycles (2) were verified in full with 0 known false positives; duplicate bodies were verified by an independent comparison; orphan files and dead exports were reviewed only as a sample, and most of the roughly 270 reported on these repositories were not reviewed. Do not read these results as an accuracy rate.
+Prompt-injection and secret-masking protections reduce risk; they do not guarantee detection of every malicious instruction or sensitive value.
 
-The 11 labelled fixtures in `test/fixtures/` (TypeScript, JavaScript and Python) are scored per rule by `test/accuracy.test.ts`: 32 true positives, 0 false positives, 0 false negatives and 2 documented misses. They are small and hand-written, so this shows the rules behave as designed on known patterns, not how they perform on an arbitrary repository.
+GuardStack AI is an analysis and context tool, not a security boundary around the coding assistant. It does not intercept the assistant's actions or guarantee that the assistant follows its recommendations.
+
+Review generated code and validate changes using your normal development and security processes.
+
+---
+## Resource limits and failure behaviour
+
+GuardStack AI applies resource limits to keep workspace analysis bounded. When a limit prevents complete analysis, the result is reported as partial or degraded rather than being presented as complete.
+
+### Indexing and parsing
+
+- File discovery and indexing are subject to configured limits and time budgets.
+- Files exceeding configured size or resource limits may be skipped.
+- Syntax trees exceeding 1,000 nesting levels or 750,000 nodes are marked degraded and are not used for normal symbol extraction.
+- Malformed or unsupported syntax can produce partial analysis or lower-confidence findings.
+- Parser resource limits protect against excessive memory use and call-stack depth. They do not interrupt a synchronous parser while it is running.
+
+### Local cache
+
+The `.guardian/` directory stores workspace-specific cache data. If persistent cache initialization is unavailable, the application can use an in-memory fallback.
+
+The cache should not be committed to version control.
+
+### External provider failures
+
+When external LLM mode is enabled, the provider chain uses Gemini first and Groq as a fallback when both are configured.
+
+Provider errors, timeouts, rate limits, and unusable responses are handled through fallback and retry controls. If no provider returns a usable response, the operation uses its local result where possible.
+
+Requests blocked by outbound-data policy are not sent.
+
+### MCP transport
+
+The MCP server communicates over stdio. Protocol messages are written to standard output, while diagnostic logs go to standard error so they do not corrupt the protocol stream.
+
+---
+
+## Known limitations
+
+GuardStack AI uses static analysis. It cannot determine every runtime behaviour or project convention.
+
+Important limitations include:
+
+- Dynamic imports, reflection, plugin registries, and runtime-generated references can make code usage difficult to determine.
+- Framework conventions and external entry points may make apparently unused code necessary.
+- Complex aliasing and package-resolution behaviour may not be fully supported.
+- Structural similarity does not establish that two functions have identical behaviour.
+- Lexical retrieval can miss conceptually related code when a query uses different terminology.
+- Python and JavaScript projects can contain dynamic patterns that static analysis cannot resolve reliably.
+- Syntax errors and damaged source files can reduce parsing confidence.
+- Results depend on the selected workspace, configuration, entry points, ignore rules, and resource budgets.
+
+Source-level analysis currently focuses on TypeScript, JavaScript, and Python. Other file types do not receive equivalent source-level analysis.
+---
+
+## Evaluation and measured behaviour
+
+GuardStack AI has been tested against real repositories, controlled seeded defects, and independent analysis tools.
+
+These results describe specific test sets and environments. They are not a universal accuracy guarantee.
+
+### Repository checks
+
+The evaluation included:
+
+- Express
+- Got
+- Zod
+- Next Learn
+- Requests
+- Click
+
+Independent-tool comparisons produced the following results:
+
+- **TypeScript compiler:** agreed with 8 findings, with 0 missed across four checked TypeScript repositories.
+- **Pyflakes:** matched 6 of 8 checked cases across Requests and Click.
+
+Agreement with another tool is useful evidence for the cases tested. It does not establish that every finding is correct or that every possible issue is detected.
+
+### Seeded-defect tests
+
+Across six repositories containing controlled defects, GuardStack AI detected **36 of 36 seeded defects**.
+
+This measures detection of the defects deliberately introduced for the test. It should not be interpreted as 100% accuracy on arbitrary codebases.
+
+### Benchmark environment
+
+The following measurements were collected on Linux x64 with a 1-vCPU Xeon environment and Node.js 22.
+
+Values are medians across three runs. RSS includes the process baseline.
+
+| Repository | Cold scan | Warm scan | Analysis | Retrieval | Validation | Peak RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| Synthetic 2,000 files | 0.76 s | 0.10 s | 0.08 s | 37 ms | 0.29 s | 205 MB |
+| Express | 0.60 s | 0.02 s | 0.01 s | 2 ms | 0.16 s | 150 MB |
+| Got | 1.50 s | 0.01 s | 0.02 s | 15 ms | 0.45 s | 184 MB |
+| Zod | 3.10 s | 0.06 s | 0.18 s | 47 ms | 0.78 s | 197 MB |
+| Next Learn | 0.25 s | 0.02 s | 0.02 s | 9 ms | 0.26 s | 151 MB |
+| Requests | 0.31 s | 0.01 s | 0.01 s | 3 ms | 0.28 s | 152 MB |
+
+These measurements describe the tested environment and repositories. Actual results depend on hardware, project size, file types, and configuration.
+
+### Platform testing
+
+CI runs test, type-checking, build, and packaging checks across:
+
+- Ubuntu
+- macOS
+- Windows
+- Node.js 22 and 24
+
+The Windows CI jobs also include platform-specific process-tree termination and ACL-related checks.
+
+CI coverage is not exhaustive end-to-end testing on every machine or project configuration.
+
+---
 
 ## Development
 
+### Set up the repository
+
 ```bash
-npm run typecheck
-npm test            # unit, integration and the labelled accuracy fixtures
-npm run bench       # --root <dir> for a real repository (copied first, never modified), --runs <n>, --files <n>, --json
-npm run bench:mcp   # longest event-loop stall per phase: internal workflow (default) or --transport (real server + SDK client, in-memory); --sizes, --runs, --threshold <ms>, --root, --json
-npm run pack:smoke  # npm pack, clean install, global install, run the CLI
-npm run dev -- scan --root ../some-project
+git clone https://github.com/Ayush8092/GuardStack-AI.git
+cd GuardStack-AI
+npm ci --ignore-scripts
 ```
 
-## Syntax errors and parser limits
+Build the project:
 
-Tree-sitter repairs code it cannot parse and still returns a tree. Each file's tree is checked for `ERROR` and `MISSING` nodes. Such a file stays indexed and its valid symbols are kept, but it is listed in `parseIssues` (`scan --json`) and in the coverage note, the analysis is `PARTIAL`, and findings that depend on it are low confidence:
+```bash
+npm run build
+```
 
-- `recovered`: the damage is inside the body of a function, method or class, including one wrapped in `export` (`export function f() { <error> }` is still the exported function `f`). Top-level declarations, imports and exports were extracted; names used inside the damaged region may be missed (so `unused-import` is low confidence there).
-- `degraded`: the damage is at the top level, inside an import or export header (a specifier list, an export clause, the signature of an exported function), or an unclosed body swallowed the code after it (an `export` or `import` found inside a function body can only be code that belongs at the top level). Imports, exports or declarations may be missing (so `orphan-file` and `dead-export` anywhere in the workspace are low confidence, because the missing importer may be the damaged file).
-- A function whose body contains an error is not hashed, so it never takes part in duplicate detection. Its symbol is marked `partial`.
-- Valid syntax that the bundled grammar does not support also shows up here. That is a parser limitation, reported the same way.
-- **Python code the grammar accepts without an error.** The Python grammar is forgiving in two places, so `hasError` alone is not enough for Python and a second, structural check runs on every Python file:
-  - An empty suite: `def f():` or `class A:` with nothing under it parses with an empty body and no error node. It is reported as a syntax error and the file is `recovered` (the declaration itself, its name and position, is intact). `pass`, `...`, a docstring, a comment followed by a statement and one-line suites such as `def f(): pass` are valid and are not reported.
-  - A trailing comma in an import that is not parenthesized: `import os,` and `from os import path,`. It is reported and the file is `degraded`, because a malformed import is not a dependency to rely on. `from os import (path,)` and `from os import (path, name,)` are valid Python and are not reported.
-  - A problem the tree already reports as an `ERROR` or `MISSING` node is counted once, by the error walk; the structural check skips any node whose subtree reports an error. JavaScript and TypeScript are not affected by this check.
-- **Findings say why they are low confidence.** `orphan-file`, `dead-export` and `unused-import` findings that were made less certain by a damaged file list the first three damaged files with the same description used elsewhere (`path: 1 syntax error(s) near line 3: imports, exports or declarations may be missing from the extraction`), and count the rest.
+Check the local environment:
+
+```bash
+node bin/cli.js doctor
+```
+
+### Development commands
+
+| Command | Purpose |
+|---|---|
+| `npm run typecheck` | Run TypeScript type checking |
+| `npm test` | Run the test suite |
+| `npm run build` | Build the project |
+| `npm run bench` | Run analysis benchmarks |
+| `npm run bench:mcp` | Run MCP benchmarks |
+| `npm run pack:smoke` | Test the packed package and installation |
+| `npm run dev -- scan --root ../some-project` | Run the CLI from the development environment |
+
+The package smoke test checks the packed artifact and exercises installation and CLI/MCP behaviour.
+
+### Package contents
+
+The npm package includes the CLI, compiled output, license, environment example, and README.
+
+Tests, source-only development files, local caches, and workspace data are not intended to be part of the published package.
+
+---
+
+## License
+
+GuardStack AI is released under the [MIT License](LICENSE).

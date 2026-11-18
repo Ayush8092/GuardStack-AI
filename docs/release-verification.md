@@ -2,25 +2,24 @@
 
 This file separates verification of the current working revision from the historical audit of the original source archive. A PASS means the stated command was executed and its result observed on the stated tree and platform. Historical results are not evidence for the current revision.
 
-## Current revision status: Windows verified; cross-platform CI pending
+## Current revision status: Windows and cross-platform CI verified
 
-The current working tree was verified on Windows x64 with Node.js v24.16.0 and npm 11.13.0. The checks below were run after the dependency security update. This is evidence for Windows and Node 24 only; it does not establish Linux, macOS, or Node 22 compatibility. The six-job GitHub Actions matrix remains pending, so this revision is **not yet declared cross-platform release-ready**.
+The current revision was verified on Windows x64 with Node.js v24.16.0 and npm 11.13.0. The six-job GitHub Actions matrix also passed across Ubuntu, macOS and Windows with Node.js 22 and 24. This provides CI evidence across those operating systems and Node.js versions; local packaging and process-safety verification was performed on Windows x64.
 
 | Check | Command | Platform / Node | Result |
 | --- | --- | --- | --- |
 | Typecheck | `npm.cmd run typecheck` | Windows x64, Node 24.16.0 | PASS |
-| Build | `npm.cmd run build` | Windows x64, Node 24.16.0 | PASS; distribution manifest records 64 source files and 64 compiled files |
+| Build | `npm.cmd run build` | Windows x64, Node 24.16.0 | PASS |
 | Distribution integrity | `npm.cmd run verify:dist` | Windows x64, Node 24.16.0 | PASS |
-| Doctor | `npm.cmd run doctor` | Windows x64, Node 24.16.0 | PASS; Node, better-sqlite3, Tree-sitter grammars and Git reported OK |
-| Full test suite | `npm.cmd test` | Windows x64, Node 24.16.0 | PASS; 998 tests, 947 passed, 0 failed, 51 skipped |
-| Prepublish verification | `npm.cmd run prepublishOnly` | Windows x64, Node 24.16.0 | PASS; typecheck, tests, build and packaging smoke test completed |
-| Packaging smoke test after dependency update | `node scripts/pack-smoke.mjs` | Windows x64, Node 24.16.0 | PASS; package contents, clean install, installed CLI, global install and MCP stdio handshake verified |
+| Doctor | `npm.cmd run doctor` | Windows x64, Node 24.16.0 | PASS |
+| Full test suite | `npm.cmd test` | Windows x64, Node 24.16.0 | PASS; 1,005 tests, 953 passed, 0 failed, 52 skipped |
+| Packaging smoke test | `npm.cmd run pack:smoke` | Windows x64, Node 24.16.0 | PASS; package contents, clean install, CLI, MCP stdio lifecycle, process cleanup and global installation verified |
 | Dependency security audit | `npm.cmd audit` | Windows x64, Node 24.16.0 | PASS; 0 vulnerabilities |
-| GitHub Actions matrix | Ubuntu, macOS and Windows; Node 22 and 24 | GitHub Actions | NOT RUN |
+| GitHub Actions matrix | Ubuntu, macOS and Windows; Node 22 and 24 | GitHub Actions | PASS; all six jobs |
 
-The 51 skipped tests are reported as skipped, not passed. Platform-specific and capability-dependent tests must be assessed from their individual results in CI. The Windows-specific process-safety and cache-key evidence tests were also run separately in the Windows environment; their results are recorded in the test output.
+The 52 skipped tests are reported as skipped, not passed. Platform-specific and capability-dependent tests must be assessed from their individual results. The Windows-specific process-safety test file was also run separately and passed 11/11.
 
-The commit SHA is not recorded yet. Record it after the verification changes have been committed.
+The verified source revision is commit `612ce4c`. The verification document itself is being updated separately.
 
 ## Historical integration audit of the original source archive
 
@@ -51,7 +50,7 @@ Cache directory identity binding, identity-verified corruption recovery and sign
 
 | Item | Value |
 | --- | --- |
-| Commit SHA | **Not recorded.** The verification changes are not committed yet. Record the actual commit SHA here after the verification document is finalized and committed. |
+| Commit SHA | `612ce4c` — source revision verified. The release-verification document updates are not included in this commit. |
 | Version | `0.3.0` in `package.json` (`test/version-sync.test.ts` passed in the current Windows full test run above) |
 
 ## Environment
@@ -87,18 +86,14 @@ The real Tree-sitter, SQLite, Git and MCP transport tests are part of the 647 an
 
 One test is skipped, by its own condition: `falls back to memory in a read-only workspace` (`test/hardening.test.ts`) is skipped on Windows and when the process runs as root, because root can write to a read-only directory. The full run was made as root, so in that run **the test was skipped**. It was then run on its own as uid 65534 (together with three other files, 56 tests) and passed there; that is one Linux run, not a Windows or macOS result.
 
-## Still not run on the current revision
+## Additional checks not run on the current revision
 
 | Check | Command | Status |
 | --- | --- | --- |
-| GitHub Actions cross-platform matrix | Ubuntu, macOS and Windows; Node 22 and 24 (six jobs) | NOT RUN. The current local verification covers Windows x64 with Node 24.16.0 only. |
-| Linux and macOS verification | Full CI workflow | NOT RUN locally. Awaiting GitHub Actions results. |
-| Node 22 verification | Full CI workflow | NOT RUN. The current local verification used Node 24.16.0. |
 | Benchmarks | `npm run bench`, `npm run bench:mcp` | NOT RUN in this verification; not part of the release gate. CHANGELOG figures are from earlier runs. |
 | `eval/` accuracy harness | `eval/` | NOT RUN; needs network access to fetch repositories. |
-| Six-job CI evidence | GitHub Actions workflow | NOT RUN. Do not claim cross-platform release readiness until all required jobs pass. |
 
-The current Windows full-suite result is 998 tests: 947 passed, 0 failed and 51 skipped. The skipped tests remain skipped; their status must not be represented as passing. The Windows-specific process-safety test file was also run separately and passed 11/11. The cache, integrity and `.gitignore` regression tests were included in the full test run.
+The current Windows full-suite result is 1,005 tests: 953 passed, 0 failed and 52 skipped. The skipped tests remain skipped; their status must not be represented as passing. The Windows-specific process-safety test file was also run separately and passed 11/11. The cache, integrity and `.gitignore` regression tests were included in the full test run.
 ## Generated reports
 
 `test-report.txt` and `test-report-tap.txt` were captured output of an earlier run of an unrecorded tree on an unrecorded platform. They are not evidence for this revision and were removed from the project; they are generated files, excluded from the repository (`.gitignore`) and from the package. Regenerate them only from a run of the exact revision being released.
@@ -136,4 +131,4 @@ Then run the six-job CI workflow and record, per job, the result and the Node ve
 - Filesystem writes (`src/core/security/safe-file.ts`): `createFileExclusive` and `appendToRegularFile` verify, around the write, that the descriptor is still the file the path names, that it has one hard link, and that the directory has the same realpath and the same device and inode. They are before-and-after comparisons, not atomic: Node has no `openat`/`linkat`/`unlinkat`, so a swap in the final instant after the last check, or a swap that is undone between two checks, is not detected. A created file is removed on failure only while the path still names the inode this call created; the unlink goes by path, so a swap between that check and the unlink is a remaining window.
 - Windows file creation: on Windows `O_NOFOLLOW` does not exist and `O_CREAT|O_EXCL` follows a dangling symlink and creates its target (confirmed on Windows with Node v24.16.0). `createFileExclusive` therefore never opens the destination there. It creates the file in a private `.guardian-stage-*` directory inside the destination directory (same volume) and publishes it with `fs.linkSync`, which fails with `EEXIST` for any existing entry, a dangling symlink included. Limits that remain: publication is path based, so a swap in the instant between the last check and `linkSync` is not excluded and is only detected afterwards; if the directory is renamed away between staging and publication, the staging directory moves with it and is left there (nothing is created at the destination); a staged name or directory that cannot be removed (a handle held by an antivirus or indexer) can leave an empty `.guardian-stage-*` directory, and a staged name that cannot be unlinked fails the creation closed through the link-count check; a file system without hard links (FAT, exFAT, some network shares) makes creation fail with an `UnsafeFileError`; an empty file exists at the destination between publication and the write, as it does on POSIX. The Windows hard-link publication path was exercised in the current Windows x64 / Node 24.16.0 verification. This does not establish behaviour on every Windows filesystem. File systems that report inode 0 or reuse inode numbers can make two directories look identical.
 - `.gitignore`: a missing file is normal; one that exists but cannot be applied (unreadable, a symlink out of the workspace, a hard link, not a regular file, over 256 KB) makes the scan partial and is listed as a configuration problem. Its rules are then not applied, so files it would have excluded are analysed.
-- Windows process shutdown: `terminateGitChildren()` and a cancelled request end the Git process tree with `taskkill /T /F` (System32) and report the cleanup as terminated only when taskkill succeeded and the launcher is gone; otherwise it is reported as degraded (only the launcher is killed). Git processes that were already detached, or Git helpers on POSIX (only the Git process itself receives SIGTERM there), are not tracked. The Windows-specific process-safety test file passed 11/11 on Windows x64 with Node 24.16.0. POSIX process-tree behaviour still requires the Linux and macOS CI runs.
+- Windows process shutdown: `terminateGitChildren()` and a cancelled request end the Git process tree with `taskkill /T /F` (System32) and report the cleanup as terminated only when taskkill succeeded and the launcher is gone; otherwise it is reported as degraded (only the launcher is killed). Git processes that were already detached, or Git helpers on POSIX (only the Git process itself receives SIGTERM there), are not tracked. The Windows-specific process-safety test file passed 11/11 on Windows x64 with Node 24.16.0. The Linux and macOS CI jobs passed, but this does not establish cleanup of already-detached Git helpers or guarantee every possible POSIX process-tree scenario.

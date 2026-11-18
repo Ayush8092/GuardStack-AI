@@ -1,143 +1,59 @@
 # Changelog
 
+All notable changes to GuardStack AI are documented here.
+
 ## Unreleased
 
-### Windows process-tree cleanup and discovery memory budget
-- `src/core/git/git.ts`: process-tree termination reports an outcome (`tree-terminated`, `exited-before-kill`, `degraded`, `process-signalled`). `tree-terminated` requires taskkill to succeed and the launcher to be gone; a missing, failing, hanging or lying taskkill is `degraded`, is logged and kept in `degradedCleanups()`, and is never reported as success. `terminateGitChildren()` returns a summary. A process stays tracked until it has exited (not until its caller was released), so shutdown can still find a launcher that could not be killed. One kill attempt per process; an already-ended pid is never targeted. Windows tests for these cases are written but NOT RUN on Windows; Linux runs simulate taskkill with scripts.
-- `src/core/ast/discovery.ts`, `src/utils/config.ts`: discovery keeps a deterministic memory estimate and stops with `memory-limit` (PARTIAL) at the new `maxDiscoveryMemoryMb` (default 128, ceiling 256). The trusted ceiling of `maxDiscoveryEntries` is lowered from 2,000,000 to 1,000,000.
+### Security
+- Hardened secret masking for inline credentials and sensitive values.
+- Added stricter outbound payload validation to prevent unverified or unsafe content from reaching external providers.
+- Improved fail-closed behaviour when masking or outbound validation encounters an error.
 
-### Remaining release items
-- `.gitignore`: a missing file stays normal; one that exists but cannot be applied is reported in `configProblems` and makes the scan partial (`readGitignoreState`; `readGitignore` still returns the text or an empty string).
-- `test/index-deadline.test.ts` is deterministic: a controlled clock replaces the 4 ms wall-clock budget, and a bookkeeping error that failed the test whenever the last call finished inside the budget is fixed.
-- Windows: `terminateGitChildren()` and cancelled requests end the whole Git process tree with `taskkill /T /F`; `test/process-safety-windows.test.ts` builds a launcher-and-grandchild tree. POSIX behaviour is unchanged.
-- `scripts/pack-smoke.mjs` fails on a stale or incomplete `dist/` and checks the installed `safe-file.js` against the source's exports.
-- README process-level behaviour matches `src/index.ts`; `test-report*.txt` are ignored; release documents state what was and was not run.
+### Reliability
+- Improved Windows Git process-tree cleanup and failure reporting.
+- Added bounded memory usage during repository discovery.
+- Hardened cache directory identity checks, corruption recovery, and cache integrity validation.
+- Improved safe file creation against symbolic-link and directory replacement races.
+- Improved cancellation handling and provider cooldown behaviour.
 
-### Cache directory races, recovery and cache poisoning
-- The cache directory is bound by identity: `.guardian` must be a plain directory, and creation, opening and every delete first prove the path still names the same device and inode (and real path); on Linux it is also held open and recovery deletes through the descriptor. A swap for a symlink or another directory makes the session use memory and leaves everything outside untouched.
-- Corruption recovery deletes `cache.db` and its sidecars only after verifying the directory and the file identity; it refuses symlinks, hard-linked files and files that are not the one that was checked. A SQLite constructor failure falls back to memory without throwing. New `OpenHooks`: `afterStateDir`, `beforeRecovery` (the existing `afterGuard` is unchanged).
-- Cache poisoning: stored results are signed with a machine-owned key kept outside the workspace (`src/db/cache-key.ts`); rows that do not verify are ignored. Databases with triggers, views, extra indexes or a different table layout are replaced, and `trusted_schema` is turned off. Reused results are checked field by field (`src/core/ast/cached-info.ts`). The row format changed (the `info` column now holds a signed envelope), so existing caches are rebuilt once. Public APIs are unchanged. Tests: `test/cache-state-dir.test.ts`, `test/cache-integrity.test.ts`.
-- Not run in the sandbox that prepared this change (no network: dependencies could not be installed); see `docs/release-verification.md`.
+### Analysis and accuracy
+- Improved Python parser error classification and evidence in affected findings.
+- Reduced false positives in import resolution, unused-code detection, and package entry-point discovery.
+- Improved partial-analysis reporting when configuration or repository files cannot be processed.
+- Hardened validation against configuration changes that could otherwise hide existing findings.
 
-### Windows: no more O_CREAT|O_EXCL on a destination that may be a dangling symlink
-- On Windows, `fs.openSync(path, O_WRONLY|O_CREAT|O_EXCL)` follows a dangling symlink and creates its target, and `O_NOFOLLOW` does not exist there, so `createFileExclusive()` could be steered to create a file outside the directory it was given. It now never opens the destination on Windows: the file is created in a private `.guardian-stage-*` directory next to the destination (same volume), verified, and published with `fs.linkSync`, which fails with `EEXIST` for any existing entry (dangling symlink included) and never overwrites. The directory is verified before and after publication, and the existing post-creation verification, write and discard-on-failure run unchanged. If hard links are unavailable it fails closed with an `UnsafeFileError`; it never falls back to the exclusive open.
-- Return values are unchanged: `true` created, `false` an existing regular file left untouched, `UnsafeFileError` for an unsafe destination or a detected change. POSIX behaviour is unchanged. `CreateHooks` keep their meaning and gain one optional member, `beforePublish`, called only by the hard-link strategy.
-- Only what this call created is removed: the staged file while it is still that inode, the staging directory with a non-recursive `rmdir` while it is still that directory, the destination only while it still names the inode this call created.
-- `createFileByHardLink()` is exported so the same strategy is tested on every platform. `test/create-hardlink-publish.test.ts` (21 tests) covers a dangling symlink, an existing-target symlink, a regular file and a directory planted right before publication, byte-for-byte preservation of an existing file, staging cleanup after success and after each failure, foreign content in the staging directory surviving, directory and symlink replacement during creation, the staged file being swapped for a symlink, fail-closed behaviour with mocked hard-link errors (and that the destination is never opened), the retry of a busy `rmdir`, and the Windows dispatch via a `process.platform` override. Mutation-checked: an unsafe fallback, recursive cleanup, missing staged-file re-check, missing cleanup on failure or success, treating every link error as `EEXIST`, and a broken dispatch are each caught.
-- Not verified here: the Windows run itself. The remaining limits are in `docs/release-verification.md`.
+### Performance and resource limits
+- Added discovery time, memory, and entry limits.
+- Improved indexing time-budget enforcement and cancellation responsiveness.
+- Added bounded syntax-tree processing to reduce resource-exhaustion risks.
 
-### Filesystem race in createFileExclusive, release-verification corrections
-- `createFileExclusive()` in `src/core/security/safe-file.ts` now follows the same pattern as `appendToRegularFile()`: after the exclusive open, the descriptor is checked against the path (same inode, regular file, not a symlink, a single hard link) and against the directory it was opened in, before and after the write. Before, it only checked before the open, so a directory replaced by a link or a new directory, or the new file swapped for a link, was not noticed and the file could be created or written in the wrong place. Mode and `O_EXCL` behaviour are unchanged.
-- Directory identity is now the directory's device and inode as well as its realpath (shared with `appendToRegularFile()`): a directory replaced by a different one at the same path has the same realpath string and was not detected by the realpath check alone.
-- On failure the file this call created is removed, but only while the path still names that inode; a substituted file, link or directory is never removed or written. If the exclusive open finds that a file it just lost a race to has vanished again, it looks once more instead of reporting a file that is not there.
-- Optional `hooks` argument (`beforeOpen`, `afterOpen`, `afterWrite`) on `createFileExclusive()` as a test seam; no production caller passes it.
-- Tests added: `test/create-exclusive.test.ts` (18 tests: normal creation and mode, existing file, directory at the name, symlinks and dangling symlinks, a link planted between check and open, directory replaced by a real directory or a link before and after the open, file replaced by a file, a link or removed after the open and after the write, hard links before the open, after the open and after the write). Mutation-checked by disabling the directory identity check, the cleanup, the cleanup's identity check and the pre-write verification: each is caught by at least one test.
-- `docs/release-verification.md`: the claim that `profile` and `pythonRoots` changes are reported only as a changed configuration was out of date (`profile-changed` and `python-roots-added` downgrades exist and are tested) and is replaced by what the code does and which tests cover it; results and platform coverage now state only what was run for this revision; the cache-trust and filesystem-race limits are listed.
-
-### Provider rate limit and release verification
-- `run()` in `src/core/llm/provider.ts` now looks for providers that are not resting before it spends the 20-per-minute allowance. Before, a call made while every provider was in cooldown still used a slot, so a burst of skipped calls could lock out the first calls after the cooldown ended. Nothing else in the provider chain changed: timeout, fallback, 429 `Retry-After`, permanent-error rest and the bounded doubling backoff are as described below.
-- Tests added: `test/provider-limits.test.ts` (21st call within a minute is refused and the limit lifts after a minute; skipped calls do not use the budget; cooldown ends after the backoff, after `Retry-After`, after the 60 s default and at the 5-minute cap; 500, 502, 503 and 504 are transient; every provider failing returns `null`). The budget test was checked to fail against the previous ordering.
-- `docs/release-verification.md` rewritten from an actual run on Linux x64, Node 22.23.4: install, typecheck, build, doctor, packaging smoke test and the full suite (608 tests, 607 passed, 1 skipped, 0 failed) all passed. The earlier NOT READY text is removed. The CI matrix (macOS, Windows, Node 24) was not run, the commit SHA is not recorded, and the one skipped test is skipped when running as root.
-
-### Security and CI hardening (sections 5 to 8 of the improvement plan)
-- AST resource exhaustion: every visitor that walked a syntax tree recursively (`codeText`, `structuralHash`, `assessParse`, `patternNames`, `literalPrefix`, and the `exports` condition search in `tsconfig.ts`) is now iterative or bounded. Before extraction, `parseFile` measures the tree with an explicit stack (`exceedsBudget`: 750,000 nodes, depth 1,000). A file over either budget returns no symbols, `parse.status = 'degraded'` and `parse.limit`, so the scan is partial and the file is named in the coverage note. Not covered: a single synchronous parse can still run long (no worker isolation added).
-- Configuration downgrades: `validateChanges` compares the base commit's rules, `ignore`, `exceptions` and `entryPoints` with the working tree, and the files analysed at the base with the files eligible now. New `Validation.configDowngrades` and `Validation.suppressedByPolicy`; findings that vanish because of a downgrade are no longer in `fixed`. `guardian check --config-policy warn|fail|approve`. Existing assertion changed: `test/p0.test.ts` expected an ignore pattern added to `.guardianrc` to turn a finding into a fix; that is the behaviour this fixes.
-- Partial validation: `guardian check --fail-on-partial` exits 1 for a partial validation; every failure reason is printed on stderr and listed in `failures` with `--json`; the text output ends with `Validation: COMPLETE|PARTIAL`. Without the option the exit code is unchanged.
-- Outbound truncation: the external request is cut once (`externalRequest`), and the acceptance criteria and the matched symbols sent externally are derived from the cut text, so nothing beyond 6,000 characters is sent through those sections. The local output still uses the full request.
-- Provider resilience: consecutive transient failures (network, timeout, 5xx, 408/409/425, unusable answer) of one provider start an exponential cooldown (5 s doubling, capped at 5 min, with jitter) from the second failure in a row; a success resets the count. Permanent errors (other 4xx) rest the provider for the cap instead of being retried on every call. 429 still honours `Retry-After`. `backoffMs` is exported for tests.
-- MCP cancellation: the client's signal now reaches `validate_rules` (Git child processes are killed; baseline reconstruction and the per-file baseline reads stop) and `optimize_prompt` (the provider request). A cancelled request surfaces as a cancellation; it is no longer turned into "not a repository", "file unreadable" or "no answer". Every Git helper takes an optional `signal`.
-- `refinePrompt` rethrows a cancellation instead of logging it as a skipped model step (found while re-reviewing the cancellation work; covered by `test/validate-cancel.test.ts`).
-- MCP server: an uncaught exception or unhandled rejection now logs, closes the cache and exits with code 1, instead of continuing to serve requests from an unknown state.
-- `docs/release-verification.md` rewritten: it states only what was executed and lists everything else as NOT RUN; the verified commit SHA is not recorded because the archive has no `.git`.
-- Tests added: `test/ast-limits.test.ts`, `test/config-downgrade.test.ts`, `test/check-exit-codes.test.ts`, two cases in `test/outbound.test.ts`. They passed in the later full run recorded in `docs/release-verification.md`.
-
-### Python parser: invalid code without an error node, evidence in findings
-- Parser health: for Python, `assessParse` now also looks for shapes the grammar accepts without reporting an error. An empty function or class body (`def f():`, `class A:`) is reported and the file is `recovered`; a trailing comma in an unparenthesized import (`import os,`, `from os import path,`) is reported and the file is `degraded`. Valid `pass`, `...`, docstring and one-line suites, and parenthesized imports with a trailing comma, are not flagged. A node whose subtree already holds an `ERROR` or `MISSING` node is skipped by this check, so nothing is counted twice, and JavaScript and TypeScript are unchanged. The check walks statements only (never expressions) and does not run on other languages.
-- Evidence: `orphan-file`, `dead-export` and `unused-import` findings that were downgraded because of syntax errors now include the damaged files and `describeHealth()` wording (up to three files, the rest counted), instead of only a count. A dead export in a damaged file that is not among the three listed is still explained on its own, and a file's details are never repeated.
-- Tests added: fake-tree cases in `test/parse-health.test.ts` (empty bodies, comment-only bodies, valid bodies, trailing commas in every import form, nested imports, double counting, JavaScript and TypeScript untouched), `test/syntax-evidence.test.ts` (evidence for all three findings, the more-than-three case, clean and complete scans unchanged), and real Tree-sitter cases in `test/parse-health-treesitter.test.ts` (passed in the full run recorded in `docs/release-verification.md`).
-
-### Release-hardening fixes
-- Discovery: a directory is checked and opened in layers (lstat, `O_NOFOLLOW | O_DIRECTORY` descriptor, identity check by device and inode, listing through `/proc/self/fd` on Linux, real-path containment, re-check after the listing), so a directory replaced by a symbolic link between listing and opening is never traversed; it is reported as `directory-replaced` and the scan is partial. The workspace root is resolved once. Limits on macOS and Windows are in the README ("Directory races").
-- Discovery: no file-system failure is dropped silently any more. A candidate whose `lstat` fails (other than ENOENT) or that is no longer a regular file is reported as `unclassified`; ENOENT is recorded as `vanished` and is not a gap; an unopenable directory stays `unreadable-directory`. All of them except `vanished` make the scan partial.
-- Indexing: the `maxIndexMs` clock starts when discovery ends, before the grammars and the cache are loaded, and the exact coverage is documented in the README and in `indexer.ts`.
-
-### Five follow-up fixes
-- Python parser health: each body is judged against the column of the declaration that owns it, not against the outermost class or function. A damaged method that swallowed the next method of its class (same `def` column, inside the same class), a damaged nested function that swallowed a later statement of the function around it, and an ERROR placed directly in a class body that absorbed a later method are now `degraded`. Nested functions, nested classes and imports indented deeper, class-level imports and an intact later sibling stay `recovered`. Existing assertion changed: `test/parse-health.test.ts` expected a sibling method absorbed by a damaged method to stay `recovered`; that is the behaviour this fix removes.
-- Local prompts: text built for the developer's own assistant now escapes repository-derived paths, names, signatures, docs and reasons the way the external payload does (`promptText` / `promptLine`): shared invisible-character definition, `<` that could open a tag written `&lt;`, no Markdown block can start from repository text, no line breaks. Outputs state that their entries are data. Hidden-character sets for `safe`, the JSON escape and the request scrub are derived from one definition in `src/utils/text.ts`.
-- Discovery: entries with an unknown Dirent type are classified with `lstat` (never following links) instead of being ignored; an entry that cannot be classified is reported (`unclassified`) and makes the scan partial. The candidate size check uses `lstat`.
-- Discovery metrics: `entries` no longer counts the entry that exceeded the limit; `peakBuffered` is renamed `peakListingBuffer` and documented as the listing buffer only, not total discovery memory. Existing assertion changed: `test/limits.test.ts` expected `entries` to be the limit plus one.
-- Indexing time limit: `maxIndexMs` now covers the whole indexing phase (reading, hashing, cache lookup, parsing), stale files are handled first so repeated calls still finish, and an unresolved import found by an interrupted or partial scan is low confidence. Existing test changed: `index-limits.test.ts` "limited runs continue from the cache" now ends with a call that has a normal budget, because with an already-expired deadline a call can no longer re-verify cached files.
-
-### Discovery limits, parse classification, latency measurement
-- Discovery: `maxDiscoveryMs` is now enforced while a directory is listed and sorted and after every entry, not only between directories. A single directory is read with `opendir` in batches instead of one blocking `readdir`, sorted in 4096-entry slices that are merged with a checkpoint every 2048 steps, and only the first `maxEntries - entries + 1` names are retained, so memory stays bounded and the entry limit still selects the same names in the same order whatever order the operating system lists them. Cancellation, `stopped` and `entries` reporting are unchanged; cancellation is never reported as an unreadable directory. Measured on one directory of 50,000 files (1 vCPU container, Node 22): with `maxDiscoveryMs=200` the previous revision ran 2842 ms and processed every entry; this revision stopped at 201 ms with `time-limit`. The longest event-loop stall fell from 38–74 ms to 16–22 ms; a walk with no limit takes about 30% longer in total (about 260–360 ms against 200–260 ms).
-- Parser: a syntax error inside the body of a function, method, class, interface or enum, including one wrapped in `export`, is now `recovered`; it used to be `degraded` because an enclosing `export_statement` counted as structural damage. Errors at the top level, in an import or export header (specifiers, export clause, signature) and bodies that absorbed an `export` or `import` (an unclosed brace) stay `degraded`. TypeScript namespace bodies are not treated as function bodies. Python now has its own rule: a def, class or import statement that starts at or left of the column of the outermost enclosing def or class (or its keyword, inside an ERROR node) was absorbed from the module level and makes the file `degraded`; deeper-indented nested functions, classes and imports stay `recovered`.
-- Discovery limits, clarified and measured: `Walk` now reports `listed` (entries read), `entries` (entries processed, what `maxDiscoveryEntries` caps) and `peakBuffered` (the most entries held at once while listing). Reading a whole directory is still required to pick its first N names deterministically, so the entry limit never limited reads; this is now documented (README, "Resource limits") and tested. Memory held while listing no longer depends on directory size: entries are kept as name and kind only, anything past the current cutoff is dropped on arrival, and the buffer is cut back at `1.5 x limit + 8192`. On 300,000 files in one directory (Node 22, 1 vCPU): peak heap 15 to 9 MB and 636 to 411 ms with `maxDiscoveryEntries=500`; 73 to 69 MB with no limit. Retained candidates remain about 0.2 KB each. Time limits and cancellation are documented as cooperative (checked between units of work, not inside one file system call or parse).
-- Indexer: cancellation is also checked between phases (after discovery, after loading grammars, after the cache is saved) and the parse budget uses a monotonic clock. New tests: discovery time limit, cancellation never removes cached records, partial scans never give a confidently-unused finding.
-- Fixed two existing tests (`index-limits.test.ts`) that could not pass: they expected `entry-limit` with 60 files while the minimum configurable limit is 100.
-- Prompt injection: invisible Unicode (the tag block U+E0000 to U+E007F, soft hyphen, variation selectors, Arabic letter mark, filler characters, interlinear annotation) is now escaped in outbound payload strings, replaced in the outbound request, scrubbed from locally built output, and makes a model-reply item `unsafe-content`. Adversarial tests added for names, directories, bidi, tag characters, lone surrogates, fabricated and traversing references and malformed replies. The README now states what is guaranteed and what is not.
-- Benchmarks: `bench/mcp-latency.ts` reports cold and warm phases at several sizes with median and p95, records the environment, always cleans up, and keeps internal-workflow numbers apart from `--transport` (real server and SDK client over an in-memory transport) numbers. `test/mcp-transport.test.ts` covers tool listing, validation, concurrency, responsiveness during a scan and protocol cancellation.
-- Release hygiene: `package-lock.json` version synchronized with `package.json` (0.3.0) and a guard test (`test/version-sync.test.ts`).
-- Tests added: single-directory discovery (20,000 and 12,000 files, deadline during entry processing and during listing, cancellation, chunked sort), synthetic-tree classification cases, and two real Tree-sitter files (`test/tree-sitter-api.test.ts`, `test/parse-health-treesitter.test.ts`). No existing test was changed.
-- `bench/mcp-latency.ts` (`npm run bench:mcp`) measures the longest event-loop stall for each phase of the tool workflows. No yielding or worker thread was added to indexing, analysis or validation: no measurement of those phases was available when this was written (see `docs/release-verification.md`). `bench/discovery.ts` gained a `flat` layout.
-
-### Large repositories, parser reliability, prompt injection
-- Indexing: directory discovery is bounded (`maxDiscoveryEntries`, `maxDiscoveryMs`), parsing is bounded (`maxIndexMs`), both yield to the event loop between slices, and MCP tool calls pass the request's cancellation signal. Discovery visits directories in sorted order, so what is seen before the entry limit is deterministic. A stopped scan reports `stopped` and `unindexed`, is never `complete`, keeps cached progress, never evicts cache rows it did not reach, and converges on the full result when repeated. No worker threads: see the benchmark in the change notes.
-- Parser: ERROR and MISSING nodes are detected after every parse and recorded as `parse` on the file (`recovered` or `degraded`), listed in `parseIssues`, and make the analysis partial. Valid symbols are kept. Bodies with errors are not hashed; their symbols are marked `partial`. `orphan-file`, `dead-export` and `unused-import` findings that depend on a damaged file are low confidence and say why. Signatures are now built without comments. Cache version 6.
-- Prompt injection: paths, names, signatures and directory names sent to an external model are serialized as JSON strings with `<`, `>` and `&` escaped, one object per line; the system prompt says these strings are untrusted; tag-like text in the request cannot close a section; outbound signatures contain no comments, docstrings or bodies.
-- Existing assertion changed: `test/hardening.test.ts` now also requires `parseIssues` to be empty for `complete` to be true.
+### Developer experience
+- Improved CLI and MCP diagnostics, validation reporting, and release packaging checks.
+- Expanded regression coverage for security, filesystem safety, parser reliability, and Windows behaviour.
 
 ## 0.3.0
 
-### Reliability update
-- Masking: removed the 1000-character windows added earlier in this release. A secret straddling a window boundary was not masked (reproduced at offset 994). Custom patterns now run over the whole text with the `m` flag under the same time limit (250 ms), so `^` and `$` anchor per line (including before a CR) and multi-line patterns still match. If the limit is hit, every non-empty line is redacted instead of passed through. An interim version that matched line by line silently stopped multi-line patterns from matching; that was found by review and fixed before release.
-- Masking: configuring an invalid, unsafe or too-short mask pattern or literal now throws; it used to be skipped silently, leaving that secret unprotected. Any failure while masking or re-verifying an outbound payload now blocks the send.
-- Configuration: a `package.json` or tsconfig that exists but cannot be read or parsed, or a tsconfig whose relative `extends` cannot be loaded, makes the analysis and the validation partial and names the file. Valid projects are unaffected.
-- `pyproject.toml` console scripts are entry points. Unused public names in importable Python package modules are reported as potentially unused. Members read from a CommonJS `require()` use the module's default export.
-- `pyproject.toml` console scripts: a quoted key (`"my-cmd" = "pkg.mod:fn"`) was valid and passed the syntax check but produced no entry point, so its module was reported as unused with no warning. Quoted and bare keys, headers with comments, spaces or quoted parts, and `module:fn [extra]` values now resolve to identical targets and identical analysis results. Valid TOML that still cannot be interpreted (an escape sequence in the value, a module name that is not an identifier) is reported as a configuration limitation with its line, which makes the analysis partial and keeps the module's finding at low confidence.
-- `pyproject.toml` is now part of configuration reporting for Python projects: a file that cannot be read, a console script entry or table header that cannot be parsed, or scripts declared in a form the reader does not follow make the analysis partial and are named; `setup.cfg` / `setup.py` console entry points (not read) are reported the same way unless `pyproject.toml` declares scripts. Only projects with Python source are affected. The reader is not a TOML parser; it is checked against Python's `tomllib` on a corpus of valid files.
-- Tests for `check --json` (and `scan` / `find`) assert that `configProblems` is present and identical across the three commands.
-- Tests that create symlinks are skipped, visibly, only on a platform that refuses to create one.
-- CI can be started by hand (`workflow_dispatch`) and records the OS and tool versions of each job.
-- Evaluation: repositories pinned to exact commits, scripts in `eval/` to fetch, analyse and compare them, tool versions and exact commands in `docs/evaluation.md`; two fresh runs produced identical output.
-- JSON output of `scan`, `check` and `find` now includes `configProblems`. Tests that spawn the CLI run Node with the tsx loader instead of `node_modules/.bin/tsx`, which cannot be spawned on Windows.
-- Evidence: `docs/evaluation.md` lists what was checked automatically, by hand, and not at all; five new labelled fixtures; per-rule true/false positive and negative reporting in `test/accuracy.test.ts`, with documented misses tracked separately.
-
-### Hardening pass (found by review and by running on real repositories)
-- Custom mask patterns: replaced the blacklist of unsafe shapes (which let `(a|a)+`, `(a|aa)*` and `a*a*a*b` through) with a safe-subset validator, a 1000-character window and a time limit that fails closed. A fuzz test over the allowed grammar found a still-slow pattern, which is why the time limit exists.
-- Baseline: a `package.json` edit alone is now validated, and the base commit's frameworks, exports, imports and names are compared; the profile, entry points, rules and exceptions of the base `.guardianrc` are compared too.
-- Partial validation is declared when a base `.guardianrc`, `.gitignore`, tsconfig or `package.json` exists but cannot be read or parsed (configuration that is equally broken before and after does not count).
-- Model output: dropped items now include links, shell fragments, markup and prompt-injection phrases, invented directories, and unbackticked identifiers or calls that do not exist; the note separates verified references from unverified commentary, with line numbers and a "not exported" flag; dropped items are summarised by reason without echoing them.
-- Retrieval: symbols matching only through their signature or doc comment are now candidates; doc comments and Python docstrings are indexed locally; output separates strong, weak, related and no match, and counts what the limit cut; a request-coverage factor ranks multi-term matches above single-word name hits; two-letter words (`ok`, `id`) are no longer discarded. Cache version 5.
-- Scope analysis: regression tests for closures, destructuring, shadowing, class scopes and Python comprehensions found and fixed two bugs: a walrus target inside a comprehension, and class-body names being visible inside methods.
-- Real repositories (express, got, zod, next-learn, create-t3-turbo, requests, click) exposed false positives, now fixed: `from . import x` created cycles through `__init__.py`; `typing` was unresolved because `tests/typing/` exists; `requests.packages.*` (a runtime alias) and aliases into hidden generated directories (`.source`) were reported as broken; compat-style re-exports and string forward references (`cast("T", x)`, `Callable[["T"], Any]`) were reported as unused imports; unused imports in `*.gen.ts` files were reported.
-- Benchmark: peak memory is the OS-reported peak instead of the current size, timings are medians of several runs, the repository under test is copied and never modified, and temporary directories are always removed.
-- Repository: removed a generated SQLite cache from the source tree, broadened `.gitignore`, and added tests that fail if runtime artifacts reappear.
-
-### Correctness
-- Validation baseline: a renamed file is restored at its original path, so imports that pointed at it still resolve in the baseline, and its findings keep their identity across the rename. Previously a rename could hide a broken import.
-- Validation baseline: rebuilt with the tsconfig, `.gitignore`, `.guardianrc`, package manifests and file list of the base commit, not today's. Editing a config file now invalidates the whole baseline.
-- Partial validation is explicit. Files over the comparison limit, or whose base version cannot be read, are listed; results are headed "provisional" and the JSON carries `partial`, `partialReasons` and `coverage`.
-- A file that imports itself at load time is reported as a one-file cycle (`a.ts → a.ts`).
-- Directory imports with a trailing slash (`require('../../')`) now resolve; a relative import into a missing `dist/` is `unsupported`, not broken. Found by running on express (58 false findings) and got.
-
-### Analysis quality
-- Unused imports are scope-aware (JS/TS and Python): shadowing parameters, locals and same-named declarations no longer hide an unused import or count as a use.
-- Resolver: package `exports`/`imports`, workspace packages, project references, `include`/`exclude`, package-based `extends`, SvelteKit and Nuxt aliases. Unmodelled mechanisms are reported as `unsupported` rather than as broken imports.
-- Duplicates split into `duplicate-body` (identical text) and `similar-structure` (same syntax shape after renaming locals), each labelled with its method. Same-name matches are low confidence.
-- Dead code is classified `unreferenced`, `potentially-unused` or `confidently-unused`, taking into account dynamic imports and globs, decorated classes, framework conventions, public package exports, unanalysed `.vue/.svelte/.astro/.mdx` files and configured entry points.
-- Every finding now has `confidence`, `method`, `evidence` and `remediation`.
-
 ### Security
-- Sandbox verifies the opened descriptor after the path check (parent-directory and file swaps are caught), rejects Windows device names and UNC forms, and now also reads `.guardianrc` through the sandbox.
-- Masker: more provider token formats, multiline secrets (split literals, template strings, YAML block scalars, docstrings), unquoted YAML values, query-string secrets; custom `maskPatterns` and `maskLiterals` (patterns are restricted to avoid catastrophic backtracking).
-- `strictOutbound` (or `GUARDIAN_STRICT=1`) refuses to send a payload that holds key-like, encoded, binary or oversized content the masker cannot vouch for.
-- All CLI output is masked, not only JSON.
-- Model replies are untrusted: strict JSON schema, and every file, symbol, path and identifier is checked against the index before anything is shown.
+- Expanded secret masking for provider tokens, multiline credentials, configuration values, and query-string secrets.
+- Added strict outbound validation and improved handling of untrusted model responses.
+- Hardened filesystem access, workspace boundaries, and repository-derived prompt content.
+
+### Reliability
+- Added explicit partial-analysis and partial-validation reporting.
+- Improved baseline reconstruction and configuration-change detection.
+- Added provider rate limiting, cooldowns, retries, and fallback handling.
+- Improved cancellation handling and bounded repository analysis.
+- Added cache integrity checks and safer recovery behaviour.
+
+### Analysis and accuracy
+- Improved JavaScript, TypeScript, and Python import resolution and unused-code detection.
+- Added scope-aware unused-import analysis.
+- Improved duplicate-code classification and confidence reporting.
+- Improved parser health reporting and handling of incomplete or invalid source files.
+- Added support for additional package exports, workspace configurations, and framework conventions.
 
 ### Features
-- `guardian find` and the `find_reusable_code` MCP tool: local lookup of reusable code with the reason for each match, or a plain "no confident match".
-- Retrieval includes useful internal helpers (marked "not exported"), explains each match, and no longer returns files only because they are popular.
-- `.guardianrc`: `profile`, `entryPoints`, `rules` (severity or off), `exceptions`, `strictOutbound`, `maskPatterns`, `maskLiterals`.
-- `guardian scan --explain`.
-- Exit codes: 0 success, 1 findings (check `--fail-on`, doctor), 2 usage or runtime error.
-- `npm run bench`, labelled accuracy fixtures, `npm run pack:smoke`, MIT `LICENSE` file.
+- Added `guardian find` and the `find_reusable_code` MCP tool for locating reusable code.
+- Added configurable analysis profiles, entry points, rules, exceptions, and secret-masking options.
+- Added explanatory scan output and structured JSON diagnostics.
+- Added benchmarks, accuracy fixtures, and package smoke tests.

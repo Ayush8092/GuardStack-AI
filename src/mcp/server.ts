@@ -8,7 +8,7 @@ import { registerValidateRules } from './tools/validate-rules.js';
 // MCP is pull-based: the client decides whether and when to call these tools. Nothing here intercepts a prompt,
 // so the instructions below only work if the assistant follows them.
 const instructions = [
-  'CodeGuardian keeps generated code consistent with the existing codebase.',
+  'GuardStack AI helps keep generated code consistent with the existing codebase.',
   'Before writing code, call find_reusable_code for each helper you are about to write, or optimize_prompt for the whole task.',
   'Reuse what they list instead of writing new functions. After your changes, call validate_rules.',
 ].join(' ');

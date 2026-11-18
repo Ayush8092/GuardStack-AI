@@ -10,7 +10,7 @@ import { errorCode, errorMessage } from '../../utils/errors.js';
 import { ensureConfig, ensureGitignore } from './init-files.js';
 
 const NUDGE =
-  'Before writing or changing code, call the CodeGuardian tool optimize_prompt with the task and follow its "Reuse existing code" list. ' +
+  'Before writing or changing code, call the GuardStack AI tool optimize_prompt with the task and follow its "Reuse existing code" list. ' +
   'After making changes, call validate_rules and fix what it reports.';
 
 function attempt(label: string, work: () => void): boolean {

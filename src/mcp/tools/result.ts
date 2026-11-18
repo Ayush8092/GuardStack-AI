@@ -7,7 +7,7 @@ import { InputError, errorMessage } from '../../utils/errors.js';
 import { log } from '../../utils/logger.js';
 import { isAbort } from '../../utils/pace.js';
 
-const INTERNAL_MESSAGE = 'CodeGuardian could not complete this request. Details were written to the server log.';
+const INTERNAL_MESSAGE = 'GuardStack AI could not complete this request. Details were written to the server log.';
 
 function failure(err: unknown): CallToolResult {
   const known = err instanceof InputError;

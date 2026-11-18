@@ -49,6 +49,7 @@ test('backoff doubles, stays between half and the full value, and never exceeds 
 });
 
 test('a single transient failure falls back but does not rest the provider', async () => {
+  process.env.GUARDIAN_LLM_TIMEOUT_MS = '5000';
   stub((host) => (isGemini(host) ? Response.json({ error: { message: 'down' } }, { status: 503 }) : Response.json(groqOk)));
   assert.equal((await complete('s', 'p'))?.provider, 'groq');
   assert.equal((await complete('s', 'p'))?.provider, 'groq');

@@ -1,0 +1,9 @@
+612ce4ccf4349af0e28694e3c4fab943ee5faba1:test/masker-inline.test.ts:generic-api-key:15
+612ce4ccf4349af0e28694e3c4fab943ee5faba1:test/masker-inline.test.ts:generic-api-key:16
+612ce4ccf4349af0e28694e3c4fab943ee5faba1:test/masker.test.ts:generic-api-key:37
+612ce4ccf4349af0e28694e3c4fab943ee5faba1:test/masker.test.ts:generic-api-key:38
+7b10cc78db8ae68f793feb18e41bbe4c7f5e793c:test/outbound.test.ts:aws-access-token:18
+7b10cc78db8ae68f793feb18e41bbe4c7f5e793c:test/prompt-injection.test.ts:generic-api-key:40
+7b10cc78db8ae68f793feb18e41bbe4c7f5e793c:test/masker.test.ts:jwt:21
+7b10cc78db8ae68f793feb18e41bbe4c7f5e793c:test/security-p1.test.ts:generic-api-key:52
+7b10cc78db8ae68f793feb18e41bbe4c7f5e793c:test/security-p1.test.ts:private-key:61
